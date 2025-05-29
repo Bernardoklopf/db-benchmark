@@ -8,7 +8,7 @@ services:
     ports:
       - "26257:26257"  # SQL port
       - "8080:8080"    # Admin UI port
-    command: start-single-node --insecure --store=cockroach-data --listen-addr=0.0.0.0:26257 --http-addr=0.0.0.0:8080 --cache=1.5GiB --max-sql-memory=1.5GiB
+    command: start-single-node --insecure --store=cockroach-data --listen-addr=localhost:26257 --http-addr=localhost:8080 --cache=1.5GiB --max-sql-memory=1.5GiB
     volumes:
       - cockroach_data_isolated:/cockroach/cockroach-data
       - ./init-scripts/cockroach:/docker-entrypoint-initdb.d
