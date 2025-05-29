@@ -1,0 +1,181 @@
+services:
+  # ScyllaDB - Cassandra-compatible, high-performance NoSQL
+  scylladb:
+    image: scylladb/scylla:5.2
+    container_name: benchmark_scylladb
+    ports:
+      - "9042:9042"  # CQL port
+      - "9160:9160"  # Thrift port
+      - "10000:10000" # REST API
+    command: --seeds=scylladb --smp 1 --memory 400M --overprovisioned 1 --developer-mode 1
+    volumes:
+      - scylla_data:/var/lib/scylla
+      - ./init-scripts/scylla:/docker-entrypoint-initdb.d
+    networks:
+      - benchmark_network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'SELECT now() FROM system.local'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ClickHouse - Columnar OLAP database
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: benchmark_clickhouse
+    ports:
+      - "8123:8123"  # HTTP port
+      - "9000:9000"  # Native port
+    environment:
+      CLICKHOUSE_DB: benchmark
+      CLICKHOUSE_USER: benchmark_user
+      CLICKHOUSE_PASSWORD: benchmark_pass
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./init-scripts/clickhouse:/docker-entrypoint-initdb.d
+      # - ./config/clickhouse/config.xml:/etc/clickhouse-server/config.xml  # Temporarily disabled for troubleshooting
+      # - ./config/clickhouse/users.xml:/etc/clickhouse-server/users.xml   # Temporarily disabled for troubleshooting
+    networks:
+      - benchmark_network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # TimescaleDB - PostgreSQL with time-series extensions
+  timescaledb:
+    image: timescale/timescaledb:2.11.2-pg15
+    container_name: benchmark_timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: benchmark
+      POSTGRES_USER: benchmark_user
+      POSTGRES_PASSWORD: benchmark_pass
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./init-scripts/timescale:/docker-entrypoint-initdb.d
+    networks:
+      - benchmark_network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U benchmark_user -d benchmark"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # CockroachDB - Distributed SQL database
+  cockroachdb:
+    image: cockroachdb/cockroach:v23.1.11
+    container_name: benchmark_cockroachdb
+    ports:
+      - "26257:26257"  # SQL port
+      - "8080:8080"    # Admin UI port
+    command: start-single-node --insecure --store=cockroach-data --listen-addr=localhost:26257 --http-addr=localhost:8080 --cache=200MiB --max-sql-memory=200MiB
+    volumes:
+      - cockroach_data:/cockroach/cockroach-data
+      - ./init-scripts/cockroach:/docker-entrypoint-initdb.d
+    networks:
+      - benchmark_network
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health?ready=1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Redis for caching and session management (optional, lightweight)
+  redis:
+    image: redis:7-alpine
+    container_name: benchmark_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - benchmark_network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  # Monitoring with Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: benchmark_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - benchmark_network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: benchmark_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - benchmark_network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+volumes:
+  scylla_data:
+  clickhouse_data:
+  timescale_data:
+  cockroach_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  benchmark_network:
+    driver: bridge

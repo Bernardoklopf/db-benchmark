@@ -1,0 +1,76 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <!-- Performance optimizations for benchmarking -->
+    <max_connections>1000</max_connections>
+    <keep_alive_timeout>3</keep_alive_timeout>
+    <max_concurrent_queries>100</max_concurrent_queries>
+    <uncompressed_cache_size>536870912</uncompressed_cache_size> <!-- 512MB -->
+    <mark_cache_size>268435456</mark_cache_size> <!-- 256MB -->
+    
+    <!-- Memory settings for 4G container limit -->
+    <max_memory_usage>2147483648</max_memory_usage> <!-- 2GB (50% of Docker limit) -->
+    <max_bytes_before_external_group_by>1073741824</max_bytes_before_external_group_by> <!-- 1GB (25% of Docker limit) -->
+    <max_bytes_before_external_sort>1073741824</max_bytes_before_external_sort> <!-- 1GB (25% of Docker limit) -->
+    
+    <!-- Logging -->
+    <logger>
+        <level>information</level>
+        <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+        <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+        <size>1000M</size>
+        <count>10</count>
+    </logger>
+    
+    <!-- HTTP interface -->
+    <http_port>8123</http_port>
+    <tcp_port>9000</tcp_port>
+    
+    <!-- Data storage -->
+    <path>/var/lib/clickhouse/</path>
+    <tmp_path>/var/lib/clickhouse/tmp/</tmp_path>
+    <user_files_path>/var/lib/clickhouse/user_files/</user_files_path>
+    <format_schema_path>/var/lib/clickhouse/format_schemas/</format_schema_path>
+    
+    <!-- Users and access control -->
+    <users_config>users.xml</users_config>
+    
+    <!-- Default profile settings -->
+    <default_profile>default</default_profile>
+    <default_database>benchmark</default_database>
+    
+    <!-- Timezone -->
+    <timezone>UTC</timezone>
+    
+    <!-- Compression -->
+    <compression>
+        <case>
+            <method>lz4</method>
+        </case>
+    </compression>
+    
+    <!-- Merge tree settings -->
+    <merge_tree>
+        <max_suspicious_broken_parts>5</max_suspicious_broken_parts>
+    </merge_tree>
+    
+    <!-- Distributed DDL -->
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+    </distributed_ddl>
+    
+    <!-- Query log -->
+    <query_log>
+        <database>system</database>
+        <table>query_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </query_log>
+    
+    <!-- Metric log -->
+    <metric_log>
+        <database>system</database>
+        <table>metric_log</table>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <collect_interval_milliseconds>1000</collect_interval_milliseconds>
+    </metric_log>
+</clickhouse>

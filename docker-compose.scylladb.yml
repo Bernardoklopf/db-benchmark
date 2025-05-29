@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  # ScyllaDB - High-performance NoSQL database (isolated)
+  scylladb:
+    image: scylladb/scylla:5.2
+    container_name: benchmark_scylladb_isolated
+    ports:
+      - "9042:9042"  # CQL port
+      - "9160:9160"  # Thrift port  
+      - "10000:10000" # REST API port
+    command: --smp 2 --memory 2G --overprovisioned 1 --developer-mode 1
+    volumes:
+      - scylla_data_isolated:/var/lib/scylla
+      - ./init-scripts/scylla:/docker-entrypoint-initdb.d
+    networks:
+      - benchmark_network
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe keyspaces' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Redis for caching (lightweight support)
+  redis:
+    image: redis:7-alpine
+    container_name: benchmark_redis_isolated
+    ports:
+      - "6379:6379"
+    networks:
+      - benchmark_network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  scylla_data_isolated:
+
+networks:
+  benchmark_network:
+    driver: bridge

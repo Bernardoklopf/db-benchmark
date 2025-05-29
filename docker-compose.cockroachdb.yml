@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # CockroachDB - Distributed SQL database (isolated)
+  cockroachdb:
+    image: cockroachdb/cockroach:v23.1.11
+    container_name: benchmark_cockroachdb_isolated
+    ports:
+      - "26257:26257"  # SQL port
+      - "8080:8080"    # Admin UI port
+    command: start-single-node --insecure --store=cockroach-data --listen-addr=0.0.0.0:26257 --http-addr=0.0.0.0:8080 --cache=1.5GiB --max-sql-memory=1.5GiB
+    volumes:
+      - cockroach_data_isolated:/cockroach/cockroach-data
+      - ./init-scripts/cockroach:/docker-entrypoint-initdb.d
+    networks:
+      - benchmark_network
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health?ready=1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Redis for caching (lightweight support)
+  redis:
+    image: redis:7-alpine
+    container_name: benchmark_redis_isolated
+    ports:
+      - "6379:6379"
+    networks:
+      - benchmark_network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  cockroach_data_isolated:
+
+networks:
+  benchmark_network:
+    driver: bridge
