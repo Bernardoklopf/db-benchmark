@@ -308,56 +308,18 @@ program
     }
   });
 
-// Setup command
+// Setup command (now just informs users that setup is automatic)
 program
   .command('setup')
-  .description('Initialize database schemas')
+  .description('Initialize database schemas (now happens automatically when starting databases)')
   .option('--databases <list>', 'Comma-separated list of databases to setup', AVAILABLE_DATABASES.join(','))
   .action(async (options) => {
-    try {
-      console.log(chalk.blue('🏗️ Setting up database schemas...'));
-      
-      const databases = parseDatabaseList(options.databases);
-      const clients = {
-        scylladb: ScyllaDBClient,
-        clickhouse: ClickHouseClient,
-        timescaledb: TimescaleDBClient,
-        cockroachdb: CockroachDBClient
-      };
-      
-      for (const dbName of databases) {
-        console.log(chalk.yellow(`\n🔧 Setting up ${dbName.toUpperCase()}...`));
-        
-        try {
-          const ClientClass = clients[dbName];
-          const client = new ClientClass();
-          
-          // ScyllaDB handles connection internally in initializeSchema
-          if (dbName !== 'scylladb') {
-            await client.connect();
-          }
-          
-          if (typeof client.initializeSchema === 'function') {
-            await client.initializeSchema();
-            console.log(chalk.green(`✅ ${dbName.toUpperCase()} schema initialized`));
-          } else {
-            console.log(chalk.yellow(`⚠️ ${dbName.toUpperCase()} schema initialization not implemented`));
-          }
-          
-          // Only disconnect if we connected
-          if (dbName !== 'scylladb' && client.isConnected) {
-            await client.disconnect();
-          }
-          
-        } catch (error) {
-          console.error(chalk.red(`❌ ${dbName.toUpperCase()} setup failed: ${error.message}`));
-        }
-      }
-      
-    } catch (error) {
-      console.error(chalk.red('❌ Setup failed:'), error.message);
-      process.exit(1);
-    }
+    console.log(chalk.blue('ℹ️ Schema initialization is now automatic'));
+    console.log(chalk.gray('Database schemas are now automatically initialized when starting databases.'));
+    console.log(chalk.gray('You can start databases with:'));
+    console.log(chalk.cyan('  npm run start-db'));
+    console.log(chalk.gray('Or:'));
+    console.log(chalk.cyan(`  node src/cli.js start-db --databases ${options.databases}`));
   });
 
 // Scenarios command

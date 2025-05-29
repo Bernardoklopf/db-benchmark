@@ -9,8 +9,8 @@ export const databaseConfig = {
     keyspace: 'benchmark',
     port: Number.parseInt(process.env.SCYLLA_PORT) || 9042,
     credentials: {
-      username: process.env.SCYLLA_USER || 'cassandra',
-      password: process.env.SCYLLA_PASSWORD || 'cassandra'
+      username: process.env.SCYLLA_USER || '',
+      password: process.env.SCYLLA_PASSWORD || ''
     },
     pooling: {
       maxRequestsPerConnection: 32768,

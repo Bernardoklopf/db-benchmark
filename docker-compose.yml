@@ -10,7 +10,6 @@ services:
     command: --seeds=scylladb --smp 1 --memory 400M --overprovisioned 1 --developer-mode 1
     volumes:
       - scylla_data:/var/lib/scylla
-      - ./init-scripts/scylla:/docker-entrypoint-initdb.d
     networks:
       - benchmark_network
     deploy:
@@ -39,7 +38,6 @@ services:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - clickhouse_data:/var/lib/clickhouse
-      - ./init-scripts/clickhouse:/docker-entrypoint-initdb.d
       # - ./config/clickhouse/config.xml:/etc/clickhouse-server/config.xml  # Temporarily disabled for troubleshooting
       # - ./config/clickhouse/users.xml:/etc/clickhouse-server/users.xml   # Temporarily disabled for troubleshooting
     networks:
@@ -69,7 +67,6 @@ services:
       POSTGRES_HOST_AUTH_METHOD: trust
     volumes:
       - timescale_data:/var/lib/postgresql/data
-      - ./init-scripts/timescale:/docker-entrypoint-initdb.d
     networks:
       - benchmark_network
     deploy:
@@ -94,7 +91,6 @@ services:
     command: start-single-node --insecure --store=cockroach-data --listen-addr=localhost:26257 --http-addr=localhost:8080 --cache=200MiB --max-sql-memory=200MiB
     volumes:
       - cockroach_data:/cockroach/cockroach-data
-      - ./init-scripts/cockroach:/docker-entrypoint-initdb.d
     networks:
       - benchmark_network
     deploy:

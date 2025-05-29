@@ -64,17 +64,16 @@ node src/cli.js docker-up
 node src/cli.js benchmark-together --scenario mixed_workload --output together-results.json
 ```
 
-### 4. Health Check and Setup
+### 4. Health Check and Scenarios
 ```bash
 # Check database connectivity
 node src/cli.js health
 
-# Initialize schemas if needed
-node src/cli.js setup
-
 # View available scenarios
 node src/cli.js scenarios
 ```
+
+> **Note**: Database schemas are now automatically initialized when databases start up
 
 ## 📊 Database Configurations
 

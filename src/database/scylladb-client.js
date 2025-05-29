@@ -74,7 +74,7 @@ export class ScyllaDBClient {
         // Messages table partitioned by conversation_id and time bucket
         `CREATE TABLE IF NOT EXISTS messages (
           conversation_id UUID,
-          time_bucket TEXT,
+          time_bucket TEXT,  -- Format: YYYY-MM-DD-HH for hourly buckets
           timestamp TIMESTAMP,
           id UUID,
           sender_type TEXT,
@@ -82,15 +82,15 @@ export class ScyllaDBClient {
           message_text TEXT,
           message_type TEXT,
           created_at TIMESTAMP,
-          metadata TEXT,
-          PRIMARY KEY (conversation_id, time_bucket, timestamp, id)
-        ) WITH CLUSTERING ORDER BY (time_bucket ASC, timestamp DESC, id ASC)
-        AND compaction = {'class': 'TimeWindowCompactionStrategy'}
+          metadata TEXT,  -- JSON as text
+          PRIMARY KEY ((conversation_id, time_bucket), timestamp, id)
+        ) WITH CLUSTERING ORDER BY (timestamp DESC)
+        AND compaction = {'class': 'TimeWindowCompactionStrategy', 'compaction_window_unit': 'HOURS', 'compaction_window_size': 24}
         AND compression = {'sstable_compression': 'LZ4Compressor'}`,
         
         // Messages by time table for time-based queries
         `CREATE TABLE IF NOT EXISTS messages_by_time (
-          time_bucket TEXT,
+          time_bucket TEXT,  -- Format: YYYY-MM-DD-HH
           timestamp TIMESTAMP,
           conversation_id UUID,
           id UUID,
@@ -101,8 +101,8 @@ export class ScyllaDBClient {
           created_at TIMESTAMP,
           metadata TEXT,
           PRIMARY KEY (time_bucket, timestamp, conversation_id, id)
-        ) WITH CLUSTERING ORDER BY (timestamp DESC, conversation_id ASC, id ASC)
-        AND compaction = {'class': 'TimeWindowCompactionStrategy'}
+        ) WITH CLUSTERING ORDER BY (timestamp DESC)
+        AND compaction = {'class': 'TimeWindowCompactionStrategy', 'compaction_window_unit': 'HOURS', 'compaction_window_size': 24}
         AND compression = {'sstable_compression': 'LZ4Compressor'}`,
         
         // Sellers table
@@ -121,15 +121,29 @@ export class ScyllaDBClient {
           id UUID PRIMARY KEY,
           name TEXT,
           phone TEXT,
-          platform_id TEXT,
+          platform_id TEXT,  -- WhatsApp/Instagram ID
           platform TEXT,
           created_at TIMESTAMP
         ) WITH compaction = {'class': 'SizeTieredCompactionStrategy'}
         AND compression = {'sstable_compression': 'LZ4Compressor'}`
       ];
       
+      // Create indexes for common queries
+      const indexes = [
+        'CREATE INDEX IF NOT EXISTS ON conversations (seller_id)',
+        'CREATE INDEX IF NOT EXISTS ON conversations (buyer_id)',
+        'CREATE INDEX IF NOT EXISTS ON conversations (last_message_at)',
+        'CREATE INDEX IF NOT EXISTS ON messages (sender_id)',
+        'CREATE INDEX IF NOT EXISTS ON messages_by_time (conversation_id)'
+      ];
+      
       for (const table of tables) {
         await this.client.execute(table);
+      }
+      
+      // Create indexes after tables are created
+      for (const index of indexes) {
+        await this.client.execute(index);
       }
       
       console.log('✅ ScyllaDB schema initialized successfully');
@@ -261,6 +275,9 @@ export class ScyllaDBClient {
   async createMessage(message) {
     const timeBucket = this.getTimeBucket(message.timestamp);
     
+    // Ensure created_at is set - use timestamp if not provided
+    const createdAt = message.created_at || message.timestamp;
+    
     // Insert into both tables for different query patterns
     const queries = [
       {
@@ -277,7 +294,7 @@ export class ScyllaDBClient {
           message.sender_id,
           message.message_text,
           message.message_type,
-          message.created_at,
+          createdAt,
           JSON.stringify(this.cleanMetadataForSerialization(message.metadata || {}))
         ]
       },
@@ -295,7 +312,7 @@ export class ScyllaDBClient {
           message.sender_id,
           message.message_text,
           message.message_type,
-          message.created_at,
+          createdAt,
           JSON.stringify(this.cleanMetadataForSerialization(message.metadata || {}))
         ]
       }
@@ -319,6 +336,8 @@ export class ScyllaDBClient {
       
       for (const message of chunk) {
         const timeBucket = this.getTimeBucket(message.timestamp);
+        // Ensure created_at is set - use timestamp if not provided
+        const createdAt = message.created_at || message.timestamp;
         
         queries.push({
           query: `
@@ -334,7 +353,7 @@ export class ScyllaDBClient {
             message.sender_id,
             message.message_text,
             message.message_type,
-            message.created_at,
+            createdAt,
             JSON.stringify(this.cleanMetadataForSerialization(message.metadata || {}))
           ]
         });
@@ -353,7 +372,7 @@ export class ScyllaDBClient {
             message.sender_id,
             message.message_text,
             message.message_type,
-            message.created_at,
+            createdAt,
             JSON.stringify(this.cleanMetadataForSerialization(message.metadata || {}))
           ]
         });
@@ -413,24 +432,106 @@ export class ScyllaDBClient {
     const cutoffTime = new Date(Date.now() - minutes * 60 * 1000);
     const timeBucket = this.getTimeBucket(cutoffTime);
     
-    const query = `
-      SELECT * FROM messages_by_time 
-      WHERE time_bucket >= ? AND timestamp >= ?
-      ORDER BY timestamp DESC 
-      LIMIT ?
-    `;
-    return await this.client.execute(query, [timeBucket, cutoffTime, limitValue], { hints: [null, null, 'int'] });
+    // For ScyllaDB, we need to query each time bucket separately since we can't do range queries on partition keys
+    // This is a common pattern for time-series data in ScyllaDB
+    const currentTime = new Date();
+    const currentBucket = this.getTimeBucket(currentTime);
+    
+    // Generate all time buckets between cutoff and now
+    const timeBuckets = this.generateTimeBuckets(cutoffTime, currentTime);
+    
+    // Execute a query for each time bucket and combine results
+    const results = [];
+    const remainingLimit = limitValue;
+    
+    for (const bucket of timeBuckets) {
+      if (results.length >= limitValue) break;
+      
+      const bucketQuery = `
+        SELECT * FROM messages_by_time 
+        WHERE time_bucket = ?
+        ORDER BY timestamp DESC 
+        LIMIT ?
+      `;
+      
+      const bucketResult = await this.client.execute(bucketQuery, [bucket, limitValue], { hints: [null, 'int'] });
+      results.push(...bucketResult.rows);
+    }
+    
+    // Sort by timestamp and limit
+    results.sort((a, b) => b.timestamp - a.timestamp);
+    return { rows: results.slice(0, limitValue) };
+  }
+  
+  // Helper to generate all time buckets between two timestamps
+  generateTimeBuckets(startTime, endTime) {
+    const buckets = [];
+    const current = new Date(startTime);
+    
+    // Set to the start of the hour
+    current.setMinutes(0, 0, 0);
+    
+    while (current <= endTime) {
+      buckets.push(this.getTimeBucket(current));
+      current.setHours(current.getHours() + 1);
+    }
+    
+    return buckets;
+  }
+  
+  // Implement getMessagesByTimeRange for complex query benchmark
+  async getMessagesByTimeRange(startTime, endTime, limit = 1000) {
+    // Ensure limit is a valid 32-bit integer
+    const limitValue = Math.min(Math.max(1, Number.parseInt(limit, 10)), 2147483647);
+    
+    // Generate all time buckets between start and end
+    const timeBuckets = this.generateTimeBuckets(startTime, endTime);
+    
+    // Execute a query for each time bucket and combine results
+    const results = [];
+    
+    for (const bucket of timeBuckets) {
+      if (results.length >= limitValue) break;
+      
+      const bucketQuery = `
+        SELECT * FROM messages_by_time 
+        WHERE time_bucket = ? AND timestamp >= ? AND timestamp <= ?
+        ORDER BY timestamp DESC 
+        LIMIT ?
+      `;
+      
+      const bucketResult = await this.client.execute(
+        bucketQuery, 
+        [bucket, startTime, endTime, limitValue], 
+        { hints: [null, null, null, 'int'] }
+      );
+      
+      results.push(...bucketResult.rows);
+    }
+    
+    // Sort by timestamp and limit
+    results.sort((a, b) => b.timestamp - a.timestamp);
+    return { rows: results.slice(0, limitValue) };
   }
 
   async getInactiveConversations(minutes = 5) {
     const cutoffTime = new Date(Date.now() - minutes * 60 * 1000);
     
+    // In ScyllaDB, we need to use the index on last_message_at
+    // First, get all conversations
     const query = `
       SELECT * FROM conversations 
-      WHERE last_message_at < ? AND status = 'active'
+      WHERE last_message_at < ? 
       ALLOW FILTERING
     `;
-    return await this.client.execute(query, [cutoffTime]);
+    
+    const result = await this.client.execute(query, [cutoffTime]);
+    
+    // Then filter for active status in application code
+    // This is a common pattern for ScyllaDB when you need to filter on multiple non-partition key columns
+    const activeInactiveConversations = result.rows.filter(conv => conv.status === 'active');
+    
+    return { rows: activeInactiveConversations };
   }
 
   async getConversationStats(conversationId) {
