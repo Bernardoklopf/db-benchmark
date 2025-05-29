@@ -21,6 +21,7 @@ export class BenchmarkRunner {
       mode: 'together', // 'isolated' or 'together'
       scenario: 'custom',
       outputFile: null,
+      timeout: 180000, // 3 minutes
       ...options
     };
     
@@ -477,14 +478,28 @@ export class BenchmarkRunner {
         
         console.log(chalk.green(`✅ ${database.toUpperCase()} completed successfully`));
         
+        // Clean up database data after test
+        await this.cleanupDatabaseData(database);
+        
       } catch (error) {
         console.error(chalk.red(`❌ ${database.toUpperCase()} failed: ${error.message}`));
         allResults.databases[database] = {
           status: 'failed',
           error: error.message
         };
+        
+        // Still attempt cleanup even on failure
+        try {
+          await this.cleanupDatabaseData(database);
+        } catch (cleanupError) {
+          console.log(chalk.gray(`⚠️ Cleanup failed for ${database}: ${cleanupError.message}`));
+        }
       }
     }
+    
+    // Final cleanup - stop all databases
+    console.log(chalk.blue('\n🛑 Stopping all database containers...'));
+    await this.dockerOrchestrator.stopAllDatabases();
     
     // Save consolidated results
     if (this.options.outputFile) {
@@ -515,14 +530,32 @@ export class BenchmarkRunner {
       mode: 'isolated'
     });
     
+    // Set a timeout for the benchmark (3 minutes default)
+    const timeoutMs = this.options.timeout || 180000; // 3 minutes
+    
     try {
-      // Run the benchmark
-      const results = await singleDbRunner.runBenchmarks();
+      // Run the benchmark with timeout
+      const results = await Promise.race([
+        singleDbRunner.runBenchmarks(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error(`Benchmark timeout after ${timeoutMs/1000}s`)), timeoutMs)
+        )
+      ]);
+      
       return results.databases[database];
       
+    } catch (error) {
+      console.error(chalk.red(`❌ Benchmark execution failed for ${database}: ${error.message}`));
+      throw error;
+      
     } finally {
-      // Ensure cleanup
-      await singleDbRunner.cleanup();
+      // Ensure cleanup always happens
+      try {
+        await singleDbRunner.cleanup();
+        console.log(chalk.gray(`🔌 ${database} connections cleaned up`));
+      } catch (cleanupError) {
+        console.error(chalk.yellow(`⚠️ ${database} cleanup warning: ${cleanupError.message}`));
+      }
     }
   }
 
@@ -531,20 +564,34 @@ export class BenchmarkRunner {
     
     try {
       const ClientClass = this.clientMap[database];
-      if (!ClientClass) return;
+      if (!ClientClass) {
+        console.log(chalk.gray(`⚠️ No client class found for ${database}`));
+        return;
+      }
       
       const client = new ClientClass();
       await client.connect();
       
-      // Clean up previous test data
+      // Try multiple cleanup methods in order of preference
       if (typeof client.truncateAllTables === 'function') {
+        console.log(chalk.gray(`  🗑️ Truncating all tables for ${database}...`));
         await client.truncateAllTables();
+      } else if (typeof client.dropAllTables === 'function') {
+        console.log(chalk.gray(`  🗑️ Dropping all tables for ${database}...`));
+        await client.dropAllTables();
+      } else if (typeof client.clearDatabase === 'function') {
+        console.log(chalk.gray(`  🗑️ Clearing database for ${database}...`));
+        await client.clearDatabase();
+      } else {
+        console.log(chalk.gray(`  ⚠️ No cleanup method available for ${database}`));
       }
       
       await client.disconnect();
+      console.log(chalk.green(`✅ ${database.toUpperCase()} data cleanup completed`));
       
     } catch (error) {
-      console.log(chalk.gray(`⚠️ Cleanup warning for ${database}: ${error.message}`));
+      console.log(chalk.yellow(`⚠️ Cleanup warning for ${database}: ${error.message}`));
+      // Don't throw - cleanup failures shouldn't stop the benchmark process
     }
   }
 

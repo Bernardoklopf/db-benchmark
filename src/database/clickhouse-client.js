@@ -8,25 +8,51 @@ export class ClickHouseClient {
   }
 
   async connect() {
-    try {
-      this.client = createClient({
-        url: `http://${databaseConfig.clickhouse.host}:${databaseConfig.clickhouse.port}`,
-        username: databaseConfig.clickhouse.username,
-        password: databaseConfig.clickhouse.password,
-        database: databaseConfig.clickhouse.database,
-        compression: databaseConfig.clickhouse.compression,
-        request_timeout: databaseConfig.clickhouse.request_timeout,
-        session_timeout: databaseConfig.clickhouse.session_timeout,
-        max_open_connections: databaseConfig.clickhouse.max_open_connections
-      });
+    const maxRetries = 5;
+    const retryDelay = 2000; // 2 seconds
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        this.client = createClient({
+          url: `http://${databaseConfig.clickhouse.host}:${databaseConfig.clickhouse.port}`,
+          username: databaseConfig.clickhouse.username,
+          password: databaseConfig.clickhouse.password,
+          database: databaseConfig.clickhouse.database,
+          compression: databaseConfig.clickhouse.compression,
+          request_timeout: 60000, // Increased to 60 seconds
+          session_timeout: databaseConfig.clickhouse.session_timeout,
+          max_open_connections: databaseConfig.clickhouse.max_open_connections,
+          // Add connection pool settings
+          keep_alive: {
+            enabled: true,
+            socket_ttl: 2500,
+          }
+        });
 
-      // Test connection
-      await this.client.ping();
-      this.isConnected = true;
-      console.log('✅ ClickHouse connected successfully');
-    } catch (error) {
-      console.error('❌ ClickHouse connection failed:', error);
-      throw error;
+        // Test connection with timeout
+        await Promise.race([
+          this.client.ping(),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Ping timeout')), 10000)
+          )
+        ]);
+        
+        this.isConnected = true;
+        console.log('✅ ClickHouse connected successfully');
+        return; // Success, exit retry loop
+        
+      } catch (error) {
+        console.log(`⚠️  ClickHouse connection attempt ${attempt}/${maxRetries} failed:`, error.message);
+        
+        if (attempt === maxRetries) {
+          console.error('❌ ClickHouse connection failed after all retries:', error);
+          throw error;
+        }
+        
+        // Wait before retrying
+        console.log(`⏳ Waiting ${retryDelay}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+      }
     }
   }
 
@@ -441,16 +467,29 @@ export class ClickHouseClient {
     try {
       console.log('🏗️  Initializing ClickHouse schema...');
       
+      // Helper function to execute command with retry
+      const executeWithRetry = async (query, description = 'query') => {
+        const maxRetries = 3;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          try {
+            await this.client.command({ query });
+            return;
+          } catch (error) {
+            if (attempt === maxRetries) {
+              throw error;
+            }
+            console.log(`⚠️  ${description} attempt ${attempt}/${maxRetries} failed, retrying...`);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+      };
+      
       // Create database
-      await this.client.command({
-        query: 'CREATE DATABASE IF NOT EXISTS benchmark'
-      });
+      await executeWithRetry('CREATE DATABASE IF NOT EXISTS benchmark', 'Database creation');
       
-      await this.client.command({
-        query: 'USE benchmark'
-      });
+      await executeWithRetry('USE benchmark', 'Database selection');
       
-      // Create tables
+      // Create tables with delay between operations
       const tables = [
         // Sellers table
         `CREATE TABLE IF NOT EXISTS sellers (
@@ -517,12 +556,16 @@ export class ClickHouseClient {
         PARTITION BY toYYYYMMDD(timestamp) SETTINGS index_granularity = 8192`
       ];
       
-      // Execute table creation queries
-      for (const tableQuery of tables) {
-        await this.client.command({ query: tableQuery });
+      // Execute table creation queries with delays
+      for (let i = 0; i < tables.length; i++) {
+        await executeWithRetry(tables[i], `Table creation ${i + 1}/${tables.length}`);
+        // Small delay between table creations
+        if (i < tables.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
       }
       
-      // Create materialized views
+      // Create materialized views (with error handling)
       const views = [
         // Materialized view for real-time conversation updates
         `CREATE MATERIALIZED VIEW IF NOT EXISTS conversation_stats 
@@ -560,13 +603,13 @@ export class ClickHouseClient {
       // Execute materialized view creation queries
       for (const viewQuery of views) {
         try {
-          await this.client.command({ query: viewQuery });
+          await executeWithRetry(viewQuery, 'Materialized view creation');
         } catch (error) {
           console.log(`⚠️  Could not create materialized view: ${error.message}`);
         }
       }
       
-      // Create indexes
+      // Create indexes (with error handling)
       const indexes = [
         'ALTER TABLE conversations ADD INDEX idx_last_message_at last_message_at TYPE minmax GRANULARITY 1',
         'ALTER TABLE conversations ADD INDEX idx_seller_id seller_id TYPE bloom_filter GRANULARITY 1',
@@ -577,7 +620,7 @@ export class ClickHouseClient {
       // Execute index creation queries
       for (const indexQuery of indexes) {
         try {
-          await this.client.command({ query: indexQuery });
+          await executeWithRetry(indexQuery, 'Index creation');
         } catch (error) {
           console.log(`⚠️  Could not create index: ${error.message}`);
         }
