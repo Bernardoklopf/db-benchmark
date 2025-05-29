@@ -63,7 +63,7 @@ export const databaseConfig = {
     host: process.env.COCKROACH_HOST || 'localhost',
     port: Number.parseInt(process.env.COCKROACH_PORT) || 26257,
     database: process.env.COCKROACH_DB || 'benchmark',
-    user: process.env.COCKROACH_USER || 'benchmark_user',
+    user: process.env.COCKROACH_USER || 'root',
     password: process.env.COCKROACH_PASSWORD || '',
     max: 10, // max number of clients in the pool
     min: 2, // minimum number of clients in the pool
