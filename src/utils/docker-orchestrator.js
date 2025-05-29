@@ -7,9 +7,36 @@ const execAsync = promisify(exec);
 
 export class DockerOrchestrator {
   constructor() {
-    this.dockerPath = '/usr/local/bin/docker';
-    this.dockerComposePath = '/usr/local/bin/docker-compose';
+    this.dockerPath = this.findDockerPath();
+    this.dockerComposePath = this.findDockerComposePath();
     this.projectRoot = process.cwd();
+    
+    // Database service mappings
+    this.databaseServices = {
+      scylladb: 'scylladb',
+      clickhouse: 'clickhouse',
+      timescaledb: 'timescaledb',
+      cockroachdb: 'cockroachdb'
+    };
+    
+    // Supporting services that are always needed
+    this.supportingServices = ['redis', 'prometheus', 'grafana'];
+  }
+
+  findDockerPath() {
+    const possiblePaths = [
+      '/usr/local/bin/docker',
+      '/opt/homebrew/bin/docker',
+      '/Applications/Docker.app/Contents/Resources/bin/docker'
+    ];
+    
+    // For now, return the most common path - could be enhanced with actual detection
+    return '/usr/local/bin/docker';
+  }
+
+  findDockerComposePath() {
+    // Try docker compose (newer) first, then docker-compose (legacy)
+    return '/usr/local/bin/docker-compose';
   }
 
   async executeCommand(command, description = '', showSpinner = true) {
@@ -20,7 +47,7 @@ export class DockerOrchestrator {
     }
     
     try {
-      const { stdout, stderr } = await execAsync(command);
+      const { stdout, stderr } = await execAsync(command, { cwd: this.projectRoot });
       
       if (spinner) {
         spinner.succeed(description);
@@ -32,50 +59,101 @@ export class DockerOrchestrator {
         spinner.fail(`${description} failed`);
       }
       
-      throw new Error(`Command failed: ${command}\nError: ${error.message}`);
+      console.error(chalk.red(`Command failed: ${command}`));
+      console.error(chalk.red(`Error: ${error.message}`));
+      throw error;
     }
   }
 
-  async startAllDatabases() {
-    console.log(chalk.blue('🐳 Starting all databases together...'));
+  async startDatabases(databases = [], mode = 'together') {
+    console.log(chalk.blue(`🐳 Starting databases in ${mode} mode...`));
     
+    // Validate databases
+    const validDatabases = Object.keys(this.databaseServices);
+    const invalidDatabases = databases.filter(db => !validDatabases.includes(db));
+    
+    if (invalidDatabases.length > 0) {
+      throw new Error(`Invalid databases: ${invalidDatabases.join(', ')}. Valid options: ${validDatabases.join(', ')}`);
+    }
+    
+    // If no databases specified, use all
+    const targetDatabases = databases.length === 0 ? validDatabases : databases;
+    
+    if (mode === 'isolated') {
+      await this.startIsolatedDatabases(targetDatabases);
+    } else {
+      await this.startTogetherDatabases(targetDatabases);
+    }
+    
+    // Wait for all specified databases to be ready
+    await this.waitForDatabases(targetDatabases);
+    
+    console.log(chalk.green(`✅ All specified databases (${targetDatabases.join(', ')}) are ready!`));
+  }
+
+  async startIsolatedDatabases(databases) {
+    // In isolated mode, we start one database at a time
+    // First, ensure all containers are stopped
+    await this.stopAllDatabases();
+    
+    // Start supporting services first
+    const supportingServicesStr = this.supportingServices.join(' ');
     await this.executeCommand(
-      `${this.dockerComposePath} -f docker-compose.yml up -d`,
-      'Starting all database containers'
+      `${this.dockerComposePath} -f docker-compose.yml up -d ${supportingServicesStr}`,
+      'Starting supporting services (Redis, Prometheus, Grafana)'
     );
-
-    // Wait for containers to be ready
-    await this.waitForContainers(['scylladb', 'clickhouse', 'timescaledb', 'cockroachdb']);
+    
+    // Start the specified databases
+    const databaseServicesStr = databases.map(db => this.databaseServices[db]).join(' ');
+    await this.executeCommand(
+      `${this.dockerComposePath} -f docker-compose.yml up -d ${databaseServicesStr}`,
+      `Starting databases: ${databases.join(', ')}`
+    );
   }
 
-  async startIsolatedDatabase(database) {
-    const validDatabases = ['scylladb', 'clickhouse', 'timescaledb', 'cockroachdb'];
+  async startTogetherDatabases(databases) {
+    // In together mode, start all specified databases simultaneously
+    const allServices = [
+      ...this.supportingServices,
+      ...databases.map(db => this.databaseServices[db])
+    ];
     
-    if (!validDatabases.includes(database)) {
-      throw new Error(`Invalid database: ${database}. Valid options: ${validDatabases.join(', ')}`);
-    }
-
-    // First stop all containers
-    await this.executeCommand(`${this.dockerComposePath} -f docker-compose.yml down`, 'Stopping all containers');
-    
-    // Start only the specified database
-    await this.executeCommand(`${this.dockerComposePath} -f docker-compose.yml up -d ${database}`, `Starting ${database} in isolation`);
-    
-    // Wait for the database to be ready
-    await this.waitForDatabase(database);
+    const servicesStr = allServices.join(' ');
+    await this.executeCommand(
+      `${this.dockerComposePath} -f docker-compose.yml up -d ${servicesStr}`,
+      `Starting all services: ${allServices.join(', ')}`
+    );
   }
 
   async stopAllDatabases() {
-    await this.executeCommand(`${this.dockerComposePath} -f docker-compose.yml down`, 'Stopping all database containers');
+    console.log(chalk.yellow('🛑 Stopping all database containers...'));
+    await this.executeCommand(
+      `${this.dockerComposePath} -f docker-compose.yml down`,
+      'Stopping all containers'
+    );
   }
 
-  async stopIsolatedDatabase(database) {
-    await this.executeCommand(`${this.dockerComposePath} -f docker-compose.yml stop ${database}`, `Stopping ${database}`);
+  async stopDatabases(databases) {
+    if (!databases || databases.length === 0) {
+      return await this.stopAllDatabases();
+    }
+    
+    const services = databases.map(db => this.databaseServices[db]);
+    const servicesStr = services.join(' ');
+    
+    await this.executeCommand(
+      `${this.dockerComposePath} -f docker-compose.yml stop ${servicesStr}`,
+      `Stopping databases: ${databases.join(', ')}`
+    );
   }
 
   async getContainerStatus() {
     try {
-      const result = await this.executeCommand(`${this.dockerComposePath} -f docker-compose.yml ps`, 'Getting container status', false);
+      const result = await this.executeCommand(
+        `${this.dockerComposePath} -f docker-compose.yml ps`,
+        'Getting container status',
+        false
+      );
       return result;
     } catch (error) {
       console.error(chalk.red('Failed to get container status:'), error.message);
@@ -84,83 +162,88 @@ export class DockerOrchestrator {
   }
 
   async cleanupAllContainers() {
-    // Stop all containers
-    await this.executeCommand(`${this.dockerComposePath} -f docker-compose.yml down`, 'Stopping all containers');
+    console.log(chalk.yellow('🧹 Cleaning up all containers and resources...'));
     
-    // Remove volumes (optional - uncomment if you want to clean volumes too)
-    // await this.executeCommand(`${this.dockerComposePath} -f docker-compose.yml down -v`, 'Removing volumes');
+    // Stop all containers
+    await this.executeCommand(
+      `${this.dockerComposePath} -f docker-compose.yml down`,
+      'Stopping all containers'
+    );
+    
+    // Optional: Remove volumes (uncomment if needed)
+    // await this.executeCommand(
+    //   `${this.dockerComposePath} -f docker-compose.yml down -v`,
+    //   'Removing volumes'
+    // );
     
     // Prune unused containers and networks
-    await this.executeCommand(`${this.dockerPath} system prune -f`, 'Cleaning up Docker system');
+    await this.executeCommand(
+      `${this.dockerPath} system prune -f`,
+      'Cleaning up Docker system'
+    );
   }
 
-  async waitForDatabase(database) {
-    const maxAttempts = 30;
+  async waitForDatabases(databases) {
+    const maxAttempts = 60; // Increased timeout
     const delay = 2000; // 2 seconds
     
-    console.log(chalk.yellow(`⏳ Waiting for ${database} to be ready...`));
+    console.log(chalk.yellow(`⏳ Waiting for databases to be ready: ${databases.join(', ')}...`));
+    
+    for (const database of databases) {
+      await this.waitForDatabase(database, maxAttempts, delay);
+    }
+  }
+
+  async waitForDatabase(database, maxAttempts = 60, delay = 2000) {
+    const serviceName = this.databaseServices[database];
     
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        const result = await this.executeCommand(
-          `${this.dockerComposePath} -f docker-compose.yml exec -T ${database} echo "ready"`,
+        // Check if container is running and healthy
+        const healthCheck = await this.executeCommand(
+          `${this.dockerComposePath} -f docker-compose.yml ps ${serviceName}`,
           '',
           false
         );
         
-        if (result.includes('ready')) {
-          console.log(chalk.green(`✅ ${database} is ready!`));
-          return;
+        if (healthCheck.includes('healthy') || healthCheck.includes('Up')) {
+          console.log(chalk.green(`✅ ${database} is ready (attempt ${attempt})`));
+          return true;
+        }
+        
+        if (attempt < maxAttempts) {
+          console.log(chalk.gray(`⏳ ${database} not ready yet (attempt ${attempt}/${maxAttempts}), waiting...`));
+          await new Promise(resolve => setTimeout(resolve, delay));
         }
       } catch (error) {
-        // Container might not be ready yet, continue waiting
-      }
-      
-      if (attempt < maxAttempts) {
+        if (attempt === maxAttempts) {
+          console.error(chalk.red(`❌ ${database} failed to start after ${maxAttempts} attempts`));
+          throw new Error(`Database ${database} failed to start: ${error.message}`);
+        }
+        
+        console.log(chalk.gray(`⏳ ${database} not ready yet (attempt ${attempt}/${maxAttempts}), waiting...`));
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
     
-    console.log(chalk.yellow(`⚠️  ${database} may not be fully ready, but continuing...`));
+    throw new Error(`Database ${database} failed to start within ${maxAttempts * delay / 1000} seconds`);
   }
 
-  async waitForContainers(containers, maxWaitTime = 120000) {
-    console.log(chalk.blue('⏳ Waiting for containers to be ready...'));
-    
-    const startTime = Date.now();
-    const checkInterval = 2000; // Check every 2 seconds
-    
-    while (Date.now() - startTime < maxWaitTime) {
-      try {
-        const healthChecks = await Promise.all(
-          containers.map(async (container) => {
-            try {
-              const { stdout } = await execAsync(
-                `${this.dockerPath} ps --filter "name=${container}" --filter "status=running" --format "{{.Names}}"`
-              );
-              return stdout.trim().includes(container);
-            } catch {
-              return false;
-            }
-          })
-        );
-
-        if (healthChecks.every(healthy => healthy)) {
-          console.log(chalk.green('✅ All containers are running'));
-          
-          // Additional wait for database initialization
-          console.log(chalk.blue('⏳ Waiting for database initialization...'));
-          await new Promise(resolve => setTimeout(resolve, 10000));
-          
-          return;
+  async getRunningDatabases() {
+    try {
+      const status = await this.getContainerStatus();
+      const runningDatabases = [];
+      
+      for (const [dbName, serviceName] of Object.entries(this.databaseServices)) {
+        if (status.includes(serviceName) && (status.includes('Up') || status.includes('healthy'))) {
+          runningDatabases.push(dbName);
         }
-      } catch (error) {
-        // Continue waiting
       }
       
-      await new Promise(resolve => setTimeout(resolve, checkInterval));
+      return runningDatabases;
+    } catch (error) {
+      console.error(chalk.red('Failed to get running databases:'), error.message);
+      return [];
     }
-    
-    throw new Error(`Containers failed to start within ${maxWaitTime / 1000} seconds`);
   }
 }

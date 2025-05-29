@@ -4,6 +4,8 @@ import { TimescaleDBClient } from '../database/timescaledb-client.js';
 import { CockroachDBClient } from '../database/cockroachdb-client.js';
 import { DataGenerator } from '../utils/data-generator.js';
 import { performance } from 'node:perf_hooks';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import chalk from 'chalk';
 import ora from 'ora';
 import { Table } from 'console-table-printer';
@@ -15,55 +17,94 @@ export class BenchmarkRunner {
       benchmarkRuns: 5,
       batchSize: 1000,
       databases: ['scylladb', 'clickhouse', 'timescaledb', 'cockroachdb'], // Default to all databases
+      mode: 'together', // 'isolated' or 'together'
+      scenario: 'custom',
+      outputFile: null,
       ...options
     };
     
     // Only initialize clients for specified databases
     this.clients = {};
-    const clientMap = {
+    this.clientMap = {
       scylladb: ScyllaDBClient,
       clickhouse: ClickHouseClient,
       timescaledb: TimescaleDBClient,
       cockroachdb: CockroachDBClient
     };
     
+    this.initializeClients();
+    this.dataGenerator = new DataGenerator();
+    this.results = {
+      metadata: {
+        timestamp: new Date().toISOString(),
+        mode: this.options.mode,
+        scenario: this.options.scenario,
+        databases: this.options.databases,
+        configuration: {
+          warmupRuns: this.options.warmupRuns,
+          benchmarkRuns: this.options.benchmarkRuns,
+          batchSize: this.options.batchSize
+        }
+      },
+      databases: {}
+    };
+  }
+
+  initializeClients() {
     for (const dbName of this.options.databases) {
-      if (clientMap[dbName]) {
-        this.clients[dbName] = new clientMap[dbName]();
+      if (this.clientMap[dbName]) {
+        this.clients[dbName] = new this.clientMap[dbName]();
+      } else {
+        console.warn(chalk.yellow(`⚠️ Unknown database: ${dbName}`));
       }
     }
     
-    this.dataGenerator = new DataGenerator();
-    this.results = {};
+    if (Object.keys(this.clients).length === 0) {
+      throw new Error('No valid databases specified for benchmarking');
+    }
   }
 
   async initialize() {
-    console.log(chalk.blue('🚀 Initializing benchmark environment...'));
+    console.log(chalk.blue(`🚀 Initializing benchmark environment (${this.options.mode} mode)...`));
+    console.log(chalk.gray(`Databases: ${Object.keys(this.clients).join(', ')}`));
+    console.log(chalk.gray(`Scenario: ${this.options.scenario}`));
     
     const spinner = ora('Connecting to databases...').start();
     
     try {
-      // Only connect to the specified databases
-      const connectionPromises = Object.values(this.clients).map(client => client.connect());
-      await Promise.all(connectionPromises);
-      
-      spinner.succeed('All specified databases connected successfully');
-      
-      // Clean databases before benchmarking
-      await this.cleanupDatabases();
-      
-      // Health check only for specified databases
-      const healthCheckPromises = Object.entries(this.clients).map(async ([name, client]) => {
-        const isHealthy = await client.healthCheck();
-        return { name, isHealthy };
+      // Connect to all specified databases
+      const connectionPromises = Object.entries(this.clients).map(async ([dbName, client]) => {
+        try {
+          await client.connect();
+          console.log(chalk.green(`✅ ${dbName} connected`));
+          return { dbName, success: true };
+        } catch (error) {
+          console.error(chalk.red(`❌ ${dbName} connection failed: ${error.message}`));
+          return { dbName, success: false, error: error.message };
+        }
       });
       
-      const healthResults = await Promise.all(healthCheckPromises);
+      const connectionResults = await Promise.all(connectionPromises);
       
-      console.log(chalk.green('✅ Health checks passed'));
-      for (const { name, isHealthy } of healthResults) {
-        console.log(`   ${name.toUpperCase()}: ${isHealthy.status}`);
+      // Remove failed connections from clients
+      const failedConnections = connectionResults.filter(result => !result.success);
+      for (const failed of failedConnections) {
+        delete this.clients[failed.dbName];
+        this.results.databases[failed.dbName] = {
+          status: 'connection_failed',
+          error: failed.error
+        };
       }
+      
+      if (Object.keys(this.clients).length === 0) {
+        spinner.fail('No databases connected successfully');
+        throw new Error('All database connections failed');
+      }
+      
+      spinner.succeed(`Connected to ${Object.keys(this.clients).length} database(s)`);
+      
+      // Initialize schemas for connected databases
+      await this.initializeSchemas();
       
     } catch (error) {
       spinner.fail('Database initialization failed');
@@ -71,510 +112,297 @@ export class BenchmarkRunner {
     }
   }
 
-  async cleanup() {
-    console.log(chalk.blue('🧹 Cleaning up connections...'));
+  async initializeSchemas() {
+    console.log(chalk.blue('🏗️ Initializing database schemas...'));
     
-    await Promise.all(Object.values(this.clients).map(client => client.disconnect()));
+    const initPromises = Object.entries(this.clients).map(async ([dbName, client]) => {
+      try {
+        if (typeof client.initializeSchema === 'function') {
+          await client.initializeSchema();
+          console.log(chalk.green(`✅ ${dbName} schema initialized`));
+        }
+      } catch (error) {
+        console.error(chalk.red(`❌ ${dbName} schema initialization failed: ${error.message}`));
+        // Don't remove the client, just log the error
+      }
+    });
     
-    console.log(chalk.green('✅ Cleanup completed'));
+    await Promise.all(initPromises);
   }
 
-  // Clean all databases before benchmarking
-  async cleanupDatabases() {
-    console.log(chalk.yellow('🧹 Cleaning databases before benchmark...'));
+  async cleanup() {
+    console.log(chalk.blue('🧹 Cleaning up database connections...'));
     
     const cleanupPromises = Object.entries(this.clients).map(async ([dbName, client]) => {
       try {
-        if (client.truncateAllTables) {
-          await client.truncateAllTables();
-        } else {
-          console.log(chalk.yellow(`⚠️  Cleanup not implemented for ${dbName.toUpperCase()}`));
+        if (typeof client.disconnect === 'function') {
+          await client.disconnect();
+          console.log(chalk.gray(`🔌 ${dbName} disconnected`));
         }
-        console.log(chalk.green(`🗑️  ${dbName.toUpperCase()} cleaned successfully`));
       } catch (error) {
-        console.log(chalk.red(`❌ Failed to clean ${dbName.toUpperCase()}: ${error.message}`));
+        console.error(chalk.yellow(`⚠️ ${dbName} cleanup warning: ${error.message}`));
       }
     });
     
     await Promise.all(cleanupPromises);
   }
 
-  // Benchmark write operations
-  async benchmarkWrites(scenario = 'mixed_workload') {
-    console.log(chalk.yellow(`\n📝 Running write benchmarks for scenario: ${scenario}`));
+  async runBenchmarks() {
+    console.log(chalk.blue('🏁 Starting benchmark suite...'));
     
-    const testData = this.dataGenerator.generateBenchmarkScenario(scenario);
-    const databases = Object.keys(this.clients);
-    
-    this.results.writes = {};
-    
-    for (const dbName of databases) {
-      console.log(chalk.blue(`\n🔄 Testing ${dbName.toUpperCase()} writes...`));
-      
-      const client = this.clients[dbName];
-      const dbResults = {
-        sellers: await this.benchmarkEntityWrites(client, 'sellers', testData.sellers),
-        buyers: await this.benchmarkEntityWrites(client, 'buyers', testData.buyers),
-        conversations: await this.benchmarkEntityWrites(client, 'conversations', testData.conversations),
-        messages: await this.benchmarkEntityWrites(client, 'messages', testData.messages)
-      };
-      
-      this.results.writes[dbName] = dbResults;
-    }
-    
-    this.displayWriteResults();
-    return this.results.writes;
-  }
-
-  async benchmarkEntityWrites(client, entityType, data) {
-    const methodName = `create${entityType.charAt(0).toUpperCase() + entityType.slice(1, -1)}sBatch`;
-    const batchSize = this.options.batchSize;
-    const batches = this.createBatches(data, batchSize);
-    
-    console.log(`   📊 Writing ${data.length} ${entityType} in ${batches.length} batches...`);
-    
-    const results = {
-      totalRecords: data.length,
-      batchSize: batchSize,
-      batches: batches.length,
-      times: [],
-      errors: 0
-    };
-    
-    const spinner = ora(`Writing ${entityType}...`).start();
-    
-    for (let i = 0; i < batches.length; i++) {
-      const batch = batches[i];
-      const startTime = performance.now();
-      
-      try {
-        await client[methodName](batch);
-        const endTime = performance.now();
-        results.times.push(endTime - startTime);
-        
-        spinner.text = `Writing ${entityType}... ${i + 1}/${batches.length} batches`;
-      } catch (error) {
-        results.errors++;
-        console.error(`Error writing batch ${i + 1}:`, error.message);
-      }
-    }
-    
-    spinner.succeed(`Completed writing ${entityType}`);
-    
-    // Calculate statistics
-    results.totalTime = results.times.reduce((sum, time) => sum + time, 0);
-    results.avgTime = results.totalTime / results.times.length;
-    results.minTime = Math.min(...results.times);
-    results.maxTime = Math.max(...results.times);
-    results.throughput = results.totalRecords / (results.totalTime / 1000); // records per second
-    
-    return results;
-  }
-
-  // Benchmark read operations
-  async benchmarkReads() {
-    console.log(chalk.yellow('\n📖 Running read benchmarks...'));
-    
-    const databases = Object.keys(this.clients);
-    this.results.reads = {};
-    
-    for (const dbName of databases) {
-      console.log(chalk.blue(`\n🔍 Testing ${dbName.toUpperCase()} reads...`));
-      
-      const client = this.clients[dbName];
-      const dbResults = await this.runReadBenchmarks(client, dbName);
-      
-      this.results.reads[dbName] = dbResults;
-    }
-    
-    this.displayReadResults();
-    return this.results.reads;
-  }
-
-  async runReadBenchmarks(client, dbName) {
-    const benchmarks = [
-      {
-        name: 'Recent Messages',
-        operation: () => client.getRecentMessages(5, 1000),
-        description: 'Fetch messages from last 5 minutes'
-      },
-      {
-        name: 'Conversation Messages',
-        operation: async () => {
-          // Get a random conversation ID from the first conversation
-          const conversations = await client.getRecentConversations ? 
-            client.getRecentConversations(1) : 
-            [{ id: 'test-conversation-id' }];
-          
-          if (conversations.length === 0) return [];
-          
-          const conversationId = conversations[0].id;
-          return client.getConversationMessages ? 
-            client.getConversationMessages(conversationId, 100) : 
-            [];
-        },
-        description: 'Get all messages for a specific conversation'
-      },
-      {
-        name: 'Inactive Conversations',
-        operation: () => client.getInactiveConversations(5),
-        description: 'Find conversations inactive for 5+ minutes'
-      },
-      {
-        name: 'Message Search',
-        operation: () => client.searchMessages ? client.searchMessages('hello', 100) : Promise.resolve([]),
-        description: 'Search messages containing "hello"'
-      }
-    ];
-
-    const results = {};
-    
-    for (const benchmark of benchmarks) {
-      console.log(`   🔍 Running: ${benchmark.name}`);
-      
-      const times = [];
-      const errors = [];
-      
-      // Warmup runs
-      for (let i = 0; i < this.options.warmupRuns; i++) {
-        try {
-          await benchmark.operation();
-        } catch (error) {
-          // Ignore warmup errors
-        }
-      }
-      
-      // Actual benchmark runs
-      for (let i = 0; i < this.options.benchmarkRuns; i++) {
-        const startTime = performance.now();
-        
-        try {
-          const result = await benchmark.operation();
-          const endTime = performance.now();
-          times.push(endTime - startTime);
-          
-          if (i === 0) {
-            results[benchmark.name] = {
-              ...results[benchmark.name],
-              resultCount: Array.isArray(result) ? result.length : 1
-            };
-          }
-        } catch (error) {
-          errors.push(error.message);
-        }
-      }
-      
-      // Calculate statistics
-      if (times.length > 0) {
-        results[benchmark.name] = {
-          description: benchmark.description,
-          runs: times.length,
-          avgTime: times.reduce((sum, time) => sum + time, 0) / times.length,
-          minTime: Math.min(...times),
-          maxTime: Math.max(...times),
-          errors: errors.length,
-          resultCount: results[benchmark.name]?.resultCount || 0
-        };
-      }
-    }
-    
-    return results;
-  }
-
-  // Benchmark concurrent operations
-  async benchmarkConcurrency(concurrentUsers = 5, operationsPerUser = 20) {
-    console.log(chalk.yellow(`\n⚡ Running concurrency benchmarks (${concurrentUsers} users, ${operationsPerUser} ops each)...`));
-    
-    const databases = Object.keys(this.clients);
-    this.results.concurrency = {};
-    
-    // Generate test data for concurrent operations
-    const conversationIds = Array.from({ length: 100 }, () => 
-      this.dataGenerator.generateConversation('seller-1', 'buyer-1').id
-    );
-    
-    for (const dbName of databases) {
-      console.log(chalk.blue(`\n⚡ Testing ${dbName.toUpperCase()} concurrency...`));
-      
-      const client = this.clients[dbName];
-      const results = await this.runConcurrencyTest(client, conversationIds, concurrentUsers, operationsPerUser);
-      
-      this.results.concurrency[dbName] = results;
-    }
-    
-    this.displayConcurrencyResults();
-    return this.results.concurrency;
-  }
-
-  async runConcurrencyTest(client, conversationIds, concurrentUsers, operationsPerUser) {
-    const startTime = performance.now();
-    
-    const userPromises = Array.from({ length: concurrentUsers }, async (_, userIndex) => {
-      const userResults = {
-        userId: userIndex,
-        operations: 0,
-        errors: 0,
-        times: []
-      };
-      
-      for (let i = 0; i < operationsPerUser; i++) {
-        const opStartTime = performance.now();
-        
-        try {
-          // Simulate mixed read/write operations
-          if (Math.random() < 0.7) {
-            // 70% reads
-            const conversationId = conversationIds[Math.floor(Math.random() * conversationIds.length)];
-            await client.getConversationMessages(conversationId, 50);
-          } else {
-            // 30% writes
-            const message = this.dataGenerator.generateMessage(
-              conversationIds[Math.floor(Math.random() * conversationIds.length)],
-              `user-${userIndex}`,
-              'buyer'
-            );
-            await client.createMessage(message);
-          }
-          
-          const opEndTime = performance.now();
-          userResults.times.push(opEndTime - opStartTime);
-          userResults.operations++;
-        } catch (error) {
-          userResults.errors++;
-        }
-      }
-      
-      return userResults;
-    });
-    
-    const userResults = await Promise.all(userPromises);
-    const endTime = performance.now();
-    
-    // Aggregate results
-    const totalOperations = userResults.reduce((sum, user) => sum + user.operations, 0);
-    const totalErrors = userResults.reduce((sum, user) => sum + user.errors, 0);
-    const allTimes = userResults.flatMap(user => user.times);
-    
-    return {
-      concurrentUsers,
-      operationsPerUser,
-      totalOperations,
-      totalErrors,
-      totalTime: endTime - startTime,
-      avgOperationTime: allTimes.reduce((sum, time) => sum + time, 0) / allTimes.length,
-      throughput: totalOperations / ((endTime - startTime) / 1000),
-      errorRate: totalErrors / (concurrentUsers * operationsPerUser)
-    };
-  }
-
-  // Utility methods
-  createBatches(data, batchSize) {
-    const batches = [];
-    for (let i = 0; i < data.length; i += batchSize) {
-      batches.push(data.slice(i, i + batchSize));
-    }
-    return batches;
-  }
-
-  displayWriteResults() {
-    console.log(chalk.green('\n📊 Write Benchmark Results'));
-    
-    const table = new Table({
-      title: 'Write Performance Comparison',
-      columns: [
-        { name: 'database', title: 'Database' },
-        { name: 'entity', title: 'Entity' },
-        { name: 'records', title: 'Records' },
-        { name: 'throughput', title: 'Throughput (rec/s)' },
-        { name: 'avgTime', title: 'Avg Time (ms)' },
-        { name: 'errors', title: 'Errors' }
-      ]
-    });
-    
-    for (const [dbName, dbResults] of Object.entries(this.results.writes)) {
-      for (const [entity, results] of Object.entries(dbResults)) {
-        table.addRow({
-          database: dbName.toUpperCase(),
-          entity: entity,
-          records: results.totalRecords.toLocaleString(),
-          throughput: Math.round(results.throughput).toLocaleString(),
-          avgTime: Math.round(results.avgTime),
-          errors: results.errors
-        });
-      }
-    }
-    
-    table.printTable();
-  }
-
-  displayReadResults() {
-    console.log(chalk.green('\n📊 Read Benchmark Results'));
-    
-    const table = new Table({
-      title: 'Read Performance Comparison',
-      columns: [
-        { name: 'database', title: 'Database' },
-        { name: 'operation', title: 'Operation' },
-        { name: 'avgTime', title: 'Avg Time (ms)' },
-        { name: 'minTime', title: 'Min Time (ms)' },
-        { name: 'maxTime', title: 'Max Time (ms)' },
-        { name: 'results', title: 'Results' },
-        { name: 'errors', title: 'Errors' }
-      ]
-    });
-    
-    for (const [dbName, dbResults] of Object.entries(this.results.reads)) {
-      for (const [operation, results] of Object.entries(dbResults)) {
-        table.addRow({
-          database: dbName.toUpperCase(),
-          operation: operation,
-          avgTime: Math.round(results.avgTime),
-          minTime: Math.round(results.minTime),
-          maxTime: Math.round(results.maxTime),
-          results: results.resultCount,
-          errors: results.errors
-        });
-      }
-    }
-    
-    table.printTable();
-  }
-
-  displayConcurrencyResults() {
-    console.log(chalk.green('\n📊 Concurrency Benchmark Results'));
-    
-    const table = new Table({
-      title: 'Concurrency Performance Comparison',
-      columns: [
-        { name: 'database', title: 'Database' },
-        { name: 'users', title: 'Concurrent Users' },
-        { name: 'operations', title: 'Total Operations' },
-        { name: 'throughput', title: 'Throughput (ops/s)' },
-        { name: 'avgTime', title: 'Avg Op Time (ms)' },
-        { name: 'errorRate', title: 'Error Rate (%)' }
-      ]
-    });
-    
-    for (const [dbName, results] of Object.entries(this.results.concurrency)) {
-      table.addRow({
-        database: dbName.toUpperCase(),
-        users: results.concurrentUsers,
-        operations: results.totalOperations.toLocaleString(),
-        throughput: Math.round(results.throughput).toLocaleString(),
-        avgTime: Math.round(results.avgOperationTime),
-        errorRate: (results.errorRate * 100).toFixed(2)
-      });
-    }
-    
-    table.printTable();
-  }
-
-  async generateReport() {
-    console.log(chalk.blue('\n📋 Generating comprehensive report...'));
-    
-    const report = {
-      timestamp: new Date().toISOString(),
-      configuration: this.options,
-      results: this.results,
-      summary: await this.generateSummary()
-    };
-    
-    return report;
-  }
-
-  async generateSummary() {
-    const summary = {
-      winner: {
-        writes: this.findBestPerformer('writes', 'throughput'),
-        reads: this.findBestPerformer('reads', 'avgTime', true), // Lower is better for time
-        concurrency: this.findBestPerformer('concurrency', 'throughput')
-      },
-      metrics: await this.getSystemMetrics()
-    };
-    
-    return summary;
-  }
-
-  findBestPerformer(category, metric, lowerIsBetter = false) {
-    if (!this.results[category]) return null;
-    
-    let bestDb = null;
-    let bestValue = lowerIsBetter ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
-    
-    for (const [dbName, results] of Object.entries(this.results[category])) {
-      let value;
-      
-      if (category === 'writes') {
-        // Average throughput across all entities
-        const throughputs = Object.values(results).map(r => r[metric]);
-        value = throughputs.reduce((sum, t) => sum + t, 0) / throughputs.length;
-      } else if (category === 'reads') {
-        // Average time across all operations
-        const times = Object.values(results).map(r => r[metric]);
-        value = times.reduce((sum, t) => sum + t, 0) / times.length;
-      } else {
-        value = results[metric];
-      }
-      
-      if ((lowerIsBetter && value < bestValue) || (!lowerIsBetter && value > bestValue)) {
-        bestValue = value;
-        bestDb = dbName;
-      }
-    }
-    
-    return { database: bestDb, value: bestValue };
-  }
-
-  async getSystemMetrics() {
-    const metrics = {};
-    
-    for (const [dbName, client] of Object.entries(this.clients)) {
-      try {
-        metrics[dbName] = {
-          records: await client.getMetrics(),
-          system: await client.getSystemMetrics?.()
-        };
-      } catch (error) {
-        metrics[dbName] = { error: error.message };
-      }
-    }
-    
-    return metrics;
-  }
-
-  // Main benchmark execution
-  async runFullBenchmark(scenario = 'mixed_workload', additionalOptions = {}) {
     try {
       await this.initialize();
       
-      console.log(chalk.magenta(`\n🏁 Starting full benchmark suite with scenario: ${scenario}`));
-      console.log(chalk.gray(`Configuration: ${JSON.stringify(this.options, null, 2)}`));
+      // Run benchmarks for each connected database
+      for (const [dbName, client] of Object.entries(this.clients)) {
+        console.log(chalk.cyan(`\n📊 Benchmarking ${dbName.toUpperCase()}...`));
+        
+        try {
+          this.results.databases[dbName] = await this.runDatabaseBenchmark(dbName, client);
+          console.log(chalk.green(`✅ ${dbName} benchmarking completed`));
+        } catch (error) {
+          console.error(chalk.red(`❌ ${dbName} benchmarking failed: ${error.message}`));
+          this.results.databases[dbName] = {
+            status: 'benchmark_failed',
+            error: error.message
+          };
+        }
+      }
       
-      // Extract concurrency parameters from additional options
-      const concurrentUsers = additionalOptions.concurrentUsers || 5;
-      const operationsPerUser = additionalOptions.operationsPerUser || 20;
+      // Generate and save results
+      await this.generateReport();
       
-      // Run all benchmark categories
-      await this.benchmarkWrites(scenario);
-      await this.benchmarkReads();
-      await this.benchmarkConcurrency(concurrentUsers, operationsPerUser);
-      
-      // Generate final report
-      const report = await this.generateReport();
-      
-      console.log(chalk.green('\n🎉 Benchmark completed successfully!'));
-      console.log(chalk.blue('\n🏆 Winners:'));
-      console.log(`   Writes: ${report.summary.winner.writes?.database?.toUpperCase() || 'N/A'}`);
-      console.log(`   Reads: ${report.summary.winner.reads?.database?.toUpperCase() || 'N/A'}`);
-      console.log(`   Concurrency: ${report.summary.winner.concurrency?.database?.toUpperCase() || 'N/A'}`);
-      
-      return report;
-      
-    } catch (error) {
-      console.error(chalk.red('❌ Benchmark failed:'), error);
-      throw error;
     } finally {
       await this.cleanup();
+    }
+    
+    return this.results;
+  }
+
+  async runDatabaseBenchmark(dbName, client) {
+    const dbResults = {
+      status: 'completed',
+      benchmarks: {}
+    };
+    
+    // Run different benchmark types based on scenario
+    const benchmarkTypes = this.getBenchmarkTypes();
+    
+    for (const benchmarkType of benchmarkTypes) {
+      console.log(chalk.yellow(`  🔄 Running ${benchmarkType} benchmark...`));
+      
+      try {
+        dbResults.benchmarks[benchmarkType] = await this.runSpecificBenchmark(
+          client,
+          benchmarkType,
+          dbName
+        );
+      } catch (error) {
+        console.error(chalk.red(`    ❌ ${benchmarkType} failed: ${error.message}`));
+        dbResults.benchmarks[benchmarkType] = {
+          status: 'failed',
+          error: error.message
+        };
+      }
+    }
+    
+    return dbResults;
+  }
+
+  getBenchmarkTypes() {
+    const scenarioMap = {
+      custom: ['writes', 'reads'],
+      high_write_volume: ['writes', 'batch_writes'],
+      read_heavy_analytics: ['reads', 'complex_queries'],
+      mixed_workload: ['writes', 'reads', 'batch_writes', 'complex_queries']
+    };
+    
+    return scenarioMap[this.options.scenario] || scenarioMap.custom;
+  }
+
+  async runSpecificBenchmark(client, benchmarkType, dbName) {
+    const results = {
+      warmup: [],
+      benchmark: [],
+      average: 0,
+      min: 0,
+      max: 0,
+      operations_per_second: 0
+    };
+    
+    // Warmup runs
+    for (let i = 0; i < this.options.warmupRuns; i++) {
+      const warmupTime = await this.executeBenchmarkOperation(client, benchmarkType, true);
+      results.warmup.push(warmupTime);
+    }
+    
+    // Actual benchmark runs
+    for (let i = 0; i < this.options.benchmarkRuns; i++) {
+      const benchmarkTime = await this.executeBenchmarkOperation(client, benchmarkType, false);
+      results.benchmark.push(benchmarkTime);
+    }
+    
+    // Calculate statistics
+    results.average = results.benchmark.reduce((a, b) => a + b, 0) / results.benchmark.length;
+    results.min = Math.min(...results.benchmark);
+    results.max = Math.max(...results.benchmark);
+    results.operations_per_second = (this.options.batchSize / results.average) * 1000;
+    
+    return results;
+  }
+
+  async executeBenchmarkOperation(client, benchmarkType, isWarmup = false) {
+    const startTime = performance.now();
+    
+    try {
+      switch (benchmarkType) {
+        case 'writes':
+          await this.runWriteBenchmark(client);
+          break;
+        case 'reads':
+          await this.runReadBenchmark(client);
+          break;
+        case 'batch_writes':
+          await this.runBatchWriteBenchmark(client);
+          break;
+        case 'complex_queries':
+          await this.runComplexQueryBenchmark(client);
+          break;
+        default:
+          throw new Error(`Unknown benchmark type: ${benchmarkType}`);
+      }
+    } catch (error) {
+      if (!isWarmup) {
+        console.error(chalk.red(`    ⚠️ Operation failed: ${error.message}`));
+      }
+      throw error;
+    }
+    
+    const endTime = performance.now();
+    return endTime - startTime;
+  }
+
+  async runWriteBenchmark(client) {
+    const messages = this.dataGenerator.generateMessages(this.options.batchSize);
+    
+    for (const message of messages) {
+      await client.createMessage(message);
+    }
+  }
+
+  async runReadBenchmark(client) {
+    // Implement read operations based on client capabilities
+    if (typeof client.getRecentMessages === 'function') {
+      await client.getRecentMessages(100);
+    } else if (typeof client.healthCheck === 'function') {
+      await client.healthCheck();
+    }
+  }
+
+  async runBatchWriteBenchmark(client) {
+    const messages = this.dataGenerator.generateMessages(this.options.batchSize);
+    
+    if (typeof client.createMessagesBatch === 'function') {
+      await client.createMessagesBatch(messages);
+    } else {
+      // Fallback to individual writes
+      await this.runWriteBenchmark(client);
+    }
+  }
+
+  async runComplexQueryBenchmark(client) {
+    // Implement complex queries based on client capabilities
+    if (typeof client.getMessagesByTimeRange === 'function') {
+      const endTime = new Date();
+      const startTime = new Date(endTime.getTime() - 24 * 60 * 60 * 1000); // Last 24 hours
+      await client.getMessagesByTimeRange(startTime, endTime);
+    } else {
+      // Fallback to simple read
+      await this.runReadBenchmark(client);
+    }
+  }
+
+  async generateReport() {
+    console.log(chalk.blue('\n📊 Generating benchmark report...'));
+    
+    // Display results in console
+    this.displayResults();
+    
+    // Save to file if specified
+    if (this.options.outputFile) {
+      await this.saveResultsToFile();
+    }
+  }
+
+  displayResults() {
+    const table = new Table({
+      title: `Benchmark Results - ${this.options.mode.toUpperCase()} Mode`,
+      columns: [
+        { name: 'database', title: 'Database', alignment: 'left' },
+        { name: 'status', title: 'Status', alignment: 'center' },
+        { name: 'avg_ops_sec', title: 'Avg Ops/Sec', alignment: 'right' },
+        { name: 'best_time', title: 'Best Time (ms)', alignment: 'right' }
+      ]
+    });
+    
+    for (const [dbName, dbResult] of Object.entries(this.results.databases)) {
+      if (dbResult.status === 'completed' && dbResult.benchmarks) {
+        const avgOpsPerSec = Object.values(dbResult.benchmarks)
+          .filter(b => b.operations_per_second)
+          .reduce((sum, b) => sum + b.operations_per_second, 0) / 
+          Object.keys(dbResult.benchmarks).length;
+        
+        const bestTime = Math.min(
+          ...Object.values(dbResult.benchmarks)
+            .filter(b => b.min)
+            .map(b => b.min)
+        );
+        
+        table.addRow({
+          database: dbName.toUpperCase(),
+          status: '✅ Completed',
+          avg_ops_sec: Math.round(avgOpsPerSec).toLocaleString(),
+          best_time: Math.round(bestTime)
+        });
+      } else {
+        table.addRow({
+          database: dbName.toUpperCase(),
+          status: '❌ Failed',
+          avg_ops_sec: 'N/A',
+          best_time: 'N/A'
+        });
+      }
+    }
+    
+    table.printTable();
+  }
+
+  async saveResultsToFile() {
+    try {
+      // Ensure reports directory exists
+      const reportsDir = path.join(process.cwd(), 'reports');
+      await fs.mkdir(reportsDir, { recursive: true });
+      
+      // Generate filename if not provided
+      let filename = this.options.outputFile;
+      if (!filename) {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        filename = `benchmark-${this.options.mode}-${this.options.scenario}-${timestamp}.json`;
+      }
+      
+      // Ensure .json extension
+      if (!filename.endsWith('.json')) {
+        filename += '.json';
+      }
+      
+      const filepath = path.join(reportsDir, filename);
+      
+      await fs.writeFile(filepath, JSON.stringify(this.results, null, 2));
+      
+      console.log(chalk.green(`📄 Results saved to: ${filepath}`));
+      
+    } catch (error) {
+      console.error(chalk.red(`❌ Failed to save results: ${error.message}`));
     }
   }
 }

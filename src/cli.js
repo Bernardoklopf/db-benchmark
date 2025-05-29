@@ -20,510 +20,246 @@ const projectRoot = path.resolve(__dirname, '..');
 const program = new Command();
 const dockerOrchestrator = new DockerOrchestrator();
 
+// Available databases
+const AVAILABLE_DATABASES = ['scylladb', 'clickhouse', 'timescaledb', 'cockroachdb'];
+const AVAILABLE_SCENARIOS = ['custom', 'high_write_volume', 'read_heavy_analytics', 'mixed_workload'];
+
 program
   .name('whatsapp-benchmark')
   .description('WhatsApp Database Benchmarking Tool for ScyllaDB, ClickHouse, TimescaleDB, and CockroachDB')
   .version('1.0.0');
 
-// Altogether benchmark command (all databases together)
-program
-  .command('benchmark-together')
-  .description('Run benchmarks with all databases together')
-  .option('-s, --scenario <type>', 'Benchmark scenario', 'mixed_workload')
-  .option('-b, --batch-size <size>', 'Batch size for operations', '1000')
-  .option('-w, --warmup-runs <runs>', 'Number of warmup runs', '3')
-  .option('-r, --benchmark-runs <runs>', 'Number of benchmark runs', '5')
-  .option('-c, --concurrent-users <users>', 'Number of concurrent users for concurrency test', '5')
-  .option('-o, --output <file>', 'Output file for results (JSON)')
-  .option('--skip-docker', 'Skip Docker setup (assume containers are running)')
-  .action(async (options) => {
-    try {
-      console.log(chalk.blue('🚀 Starting Altogether Database Benchmark Suite'));
-      console.log(chalk.gray(`Scenario: ${options.scenario}`));
-      
-      if (!options.skipDocker) {
-        await dockerOrchestrator.startAllDatabases();
-      }
-      
-      const benchmarkOptions = {
-        batchSize: Number.parseInt(options.batchSize),
-        warmupRuns: Number.parseInt(options.warmupRuns),
-        benchmarkRuns: Number.parseInt(options.benchmarkRuns),
-        databases: ['scylladb', 'clickhouse', 'timescaledb', 'cockroachdb']
-      };
-      
-      const runner = new BenchmarkRunner(benchmarkOptions);
-      const report = await runner.runFullBenchmark(options.scenario, {
-        concurrentUsers: Number.parseInt(options.concurrentUsers)
-      });
-      
-      report.benchmarkType = 'altogether';
-      report.timestamp = new Date().toISOString();
-      
-      if (options.output) {
-        await saveReport(report, options.output);
-        console.log(chalk.green(`📄 Report saved to: ${options.output}`));
-      }
-      
-      if (!options.skipDocker) {
-        await dockerOrchestrator.stopAllDatabases();
-      }
-      
-    } catch (error) {
-      console.error(chalk.red('❌ Altogether benchmark failed:'), error.message);
-      if (!options.skipDocker) {
-        await dockerOrchestrator.stopAllDatabases();
-      }
-      process.exit(1);
-    }
-  });
+// Helper function to parse database list
+function parseDatabaseList(value) {
+  if (!value) return AVAILABLE_DATABASES;
+  
+  const databases = value.split(',').map(db => db.trim().toLowerCase());
+  const invalid = databases.filter(db => !AVAILABLE_DATABASES.includes(db));
+  
+  if (invalid.length > 0) {
+    console.error(chalk.red(`❌ Invalid databases: ${invalid.join(', ')}`));
+    console.error(chalk.gray(`Available databases: ${AVAILABLE_DATABASES.join(', ')}`));
+    process.exit(1);
+  }
+  
+  return databases;
+}
 
-// Isolated benchmark command (one database at a time)
+// Helper function to generate output filename
+function generateOutputFilename(mode, scenario, databases) {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const dbList = databases.length === AVAILABLE_DATABASES.length ? 'all' : databases.join('-');
+  return `benchmark-${mode}-${scenario}-${dbList}-${timestamp}.json`;
+}
+
+// Isolated benchmark command (databases tested one by one)
 program
   .command('benchmark-isolated')
-  .description('Run benchmarks with each database in isolation')
-  .option('-d, --databases <databases>', 'Comma-separated list of databases to test', 'scylladb,clickhouse,timescaledb,cockroachdb')
-  .option('-s, --scenario <type>', 'Benchmark scenario', 'mixed_workload')
+  .description('Run benchmarks with databases in isolation (recommended for resource-constrained environments)')
+  .option('-s, --scenario <type>', 'Benchmark scenario', 'custom')
   .option('-b, --batch-size <size>', 'Batch size for operations', '1000')
   .option('-w, --warmup-runs <runs>', 'Number of warmup runs', '3')
   .option('-r, --benchmark-runs <runs>', 'Number of benchmark runs', '5')
-  .option('-c, --concurrent-users <users>', 'Number of concurrent users for concurrency test', '5')
   .option('-o, --output <file>', 'Output file for results (JSON)')
-  .option('--skip-docker', 'Skip Docker setup (assume containers are running)')
+  .option('--databases <list>', 'Comma-separated list of databases to test', AVAILABLE_DATABASES.join(','))
+  .option('--skip-docker', 'Skip Docker setup')
   .action(async (options) => {
     try {
-      const databases = options.databases.split(',').map(db => db.trim());
       console.log(chalk.blue('🚀 Starting Isolated Database Benchmark Suite'));
-      console.log(chalk.gray(`Databases: ${databases.join(', ')}`));
-      console.log(chalk.gray(`Scenario: ${options.scenario}`));
       
-      const isolatedResults = {
-        benchmarkType: 'isolated',
-        timestamp: new Date().toISOString(),
-        scenario: options.scenario,
+      const databases = parseDatabaseList(options.databases);
+      const scenario = options.scenario;
+      
+      if (!AVAILABLE_SCENARIOS.includes(scenario)) {
+        console.error(chalk.red(`❌ Invalid scenario: ${scenario}`));
+        console.error(chalk.gray(`Available scenarios: ${AVAILABLE_SCENARIOS.join(', ')}`));
+        process.exit(1);
+      }
+      
+      console.log(chalk.gray(`Scenario: ${scenario}`));
+      console.log(chalk.gray(`Databases: ${databases.join(', ')}`));
+      console.log(chalk.gray('Mode: ISOLATED (one database at a time)'));
+      
+      const outputFile = options.output || generateOutputFilename('isolated', scenario, databases);
+      
+      // Start Docker containers if needed
+      if (!options.skipDocker) {
+        await dockerOrchestrator.startDatabases(databases, 'isolated');
+      }
+      
+      // Run benchmarks for each database individually
+      const allResults = {
+        metadata: {
+          timestamp: new Date().toISOString(),
+          mode: 'isolated',
+          scenario: scenario,
+          databases: databases,
+          configuration: {
+            warmupRuns: Number.parseInt(options.warmupRuns),
+            benchmarkRuns: Number.parseInt(options.benchmarkRuns),
+            batchSize: Number.parseInt(options.batchSize)
+          }
+        },
         databases: {}
       };
       
       for (const database of databases) {
-        console.log(chalk.blue(`\n🔍 Testing ${database.toUpperCase()} in isolation...`));
-        
-        if (!options.skipDocker) {
-          await dockerOrchestrator.startIsolatedDatabase(database);
-        }
+        console.log(chalk.cyan(`\n🔄 Testing ${database.toUpperCase()} in isolation...`));
         
         try {
+          // Start only this database
+          if (!options.skipDocker) {
+            await dockerOrchestrator.startDatabases([database], 'isolated');
+          }
+          
+          // Run benchmark for this database
           const benchmarkOptions = {
+            databases: [database],
+            mode: 'isolated',
+            scenario: scenario,
             batchSize: Number.parseInt(options.batchSize),
             warmupRuns: Number.parseInt(options.warmupRuns),
             benchmarkRuns: Number.parseInt(options.benchmarkRuns),
-            databases: [database]
+            outputFile: null // Don't save individual results
           };
           
           const runner = new BenchmarkRunner(benchmarkOptions);
-          const report = await runner.runFullBenchmark(options.scenario, {
-            concurrentUsers: Number.parseInt(options.concurrentUsers)
-          });
+          const results = await runner.runBenchmarks();
           
-          isolatedResults.databases[database] = {
-            ...report,
-            isolatedTest: true,
-            timestamp: new Date().toISOString()
-          };
+          // Merge results
+          allResults.databases[database] = results.databases[database];
           
-          console.log(chalk.green(`✅ ${database.toUpperCase()} benchmark completed`));
+          console.log(chalk.green(`✅ ${database.toUpperCase()} completed successfully`));
           
         } catch (error) {
-          console.error(chalk.red(`❌ ${database.toUpperCase()} benchmark failed:`), error.message);
-          isolatedResults.databases[database] = {
-            error: error.message,
-            timestamp: new Date().toISOString()
+          console.error(chalk.red(`❌ ${database.toUpperCase()} failed: ${error.message}`));
+          allResults.databases[database] = {
+            status: 'failed',
+            error: error.message
           };
         }
-        
-        if (!options.skipDocker) {
-          await dockerOrchestrator.stopIsolatedDatabase(database);
-        }
       }
       
-      if (options.output) {
-        await saveReport(isolatedResults, options.output);
-        console.log(chalk.green(`📄 Isolated benchmark report saved to: ${options.output}`));
-      }
+      // Save consolidated results
+      await saveResults(allResults, outputFile);
       
-      // Print summary
-      console.log(chalk.blue('\n📊 Isolated Benchmark Summary:'));
-      for (const [db, result] of Object.entries(isolatedResults.databases)) {
-        if (result.error) {
-          console.log(chalk.red(`   ${db.toUpperCase()}: FAILED - ${result.error}`));
-        } else {
-          console.log(chalk.green(`   ${db.toUpperCase()}: SUCCESS`));
-        }
-      }
+      // Display final summary
+      displayFinalSummary(allResults);
       
     } catch (error) {
-      console.error(chalk.red('❌ Isolated benchmark suite failed:'), error.message);
-      await dockerOrchestrator.cleanupAllContainers();
+      console.error(chalk.red('❌ Isolated benchmark failed:'), error.message);
       process.exit(1);
     }
   });
 
-// Legacy full benchmark command (for backward compatibility)
+// Together benchmark command (all databases simultaneously)
 program
-  .command('benchmark')
-  .description('Run full benchmark suite (legacy - use benchmark-together or benchmark-isolated)')
+  .command('benchmark-together')
+  .description('Run benchmarks with all databases together (requires adequate resources)')
   .option('-s, --scenario <type>', 'Benchmark scenario', 'mixed_workload')
   .option('-b, --batch-size <size>', 'Batch size for operations', '1000')
   .option('-w, --warmup-runs <runs>', 'Number of warmup runs', '3')
   .option('-r, --benchmark-runs <runs>', 'Number of benchmark runs', '5')
-  .option('-c, --concurrent-users <users>', 'Number of concurrent users for concurrency test', '5')
   .option('-o, --output <file>', 'Output file for results (JSON)')
-  .action(async (options) => {
-    console.log(chalk.yellow('⚠️  Using legacy benchmark command. Consider using:'));
-    console.log(chalk.yellow('   benchmark-together: Test all databases together'));
-    console.log(chalk.yellow('   benchmark-isolated: Test each database in isolation'));
-    
-    // Default to altogether benchmark for backward compatibility
-    const togetherOptions = { ...options, skipDocker: false };
-    await program.commands.find(cmd => cmd.name() === 'benchmark-together').action(togetherOptions);
-  });
-
-// Write-only benchmark
-program
-  .command('benchmark-writes')
-  .description('Run write performance benchmarks only')
-  .option('-s, --scenario <type>', 'Benchmark scenario', 'mixed_workload')
-  .option('-b, --batch-size <size>', 'Batch size for operations', '1000')
-  .option('-o, --output <file>', 'Output file for results (JSON)')
+  .option('--databases <list>', 'Comma-separated list of databases to test', AVAILABLE_DATABASES.join(','))
+  .option('--skip-docker', 'Skip Docker setup')
   .action(async (options) => {
     try {
-      console.log(chalk.blue('📝 Running Write Benchmarks'));
+      console.log(chalk.blue('🚀 Starting Together Database Benchmark Suite'));
       
-      const runner = new BenchmarkRunner({ batchSize: Number.parseInt(options.batchSize) });
-      await runner.initialize();
+      const databases = parseDatabaseList(options.databases);
+      const scenario = options.scenario;
       
-      const results = await runner.benchmarkWrites(options.scenario);
-      
-      if (options.output) {
-        await saveReport({ writes: results }, options.output);
-        console.log(chalk.green(`📄 Results saved to: ${options.output}`));
+      if (!AVAILABLE_SCENARIOS.includes(scenario)) {
+        console.error(chalk.red(`❌ Invalid scenario: ${scenario}`));
+        console.error(chalk.gray(`Available scenarios: ${AVAILABLE_SCENARIOS.join(', ')}`));
+        process.exit(1);
       }
       
-      await runner.cleanup();
+      console.log(chalk.gray(`Scenario: ${scenario}`));
+      console.log(chalk.gray(`Databases: ${databases.join(', ')}`));
+      console.log(chalk.gray('Mode: TOGETHER (all databases simultaneously)'));
       
-    } catch (error) {
-      console.error(chalk.red('❌ Write benchmark failed:'), error.message);
-      process.exit(1);
-    }
-  });
-
-// Read-only benchmark
-program
-  .command('benchmark-reads')
-  .description('Run read performance benchmarks only')
-  .option('-w, --warmup-runs <runs>', 'Number of warmup runs', '3')
-  .option('-r, --benchmark-runs <runs>', 'Number of benchmark runs', '5')
-  .option('-o, --output <file>', 'Output file for results (JSON)')
-  .action(async (options) => {
-    try {
-      console.log(chalk.blue('📖 Running Read Benchmarks'));
+      const outputFile = options.output || generateOutputFilename('together', scenario, databases);
       
-      const runner = new BenchmarkRunner({
+      // Start all databases together
+      if (!options.skipDocker) {
+        await dockerOrchestrator.startDatabases(databases, 'together');
+      }
+      
+      const benchmarkOptions = {
+        databases: databases,
+        mode: 'together',
+        scenario: scenario,
+        batchSize: Number.parseInt(options.batchSize),
         warmupRuns: Number.parseInt(options.warmupRuns),
-        benchmarkRuns: Number.parseInt(options.benchmarkRuns)
-      });
-      
-      await runner.initialize();
-      const results = await runner.benchmarkReads();
-      
-      if (options.output) {
-        await saveReport({ reads: results }, options.output);
-        console.log(chalk.green(`📄 Results saved to: ${options.output}`));
-      }
-      
-      await runner.cleanup();
-      
-    } catch (error) {
-      console.error(chalk.red('❌ Read benchmark failed:'), error.message);
-      process.exit(1);
-    }
-  });
-
-// Concurrency benchmark
-program
-  .command('benchmark-concurrency')
-  .description('Run concurrency benchmarks only')
-  .option('-u, --users <users>', 'Number of concurrent users', '10')
-  .option('-ops, --operations <ops>', 'Operations per user', '100')
-  .option('-o, --output <file>', 'Output file for results (JSON)')
-  .action(async (options) => {
-    try {
-      console.log(chalk.blue('⚡ Running Concurrency Benchmarks'));
-      
-      const runner = new BenchmarkRunner();
-      await runner.initialize();
-      
-      const results = await runner.benchmarkConcurrency(
-        Number.parseInt(options.users),
-        Number.parseInt(options.operations)
-      );
-      
-      if (options.output) {
-        await saveReport({ concurrency: results }, options.output);
-        console.log(chalk.green(`📄 Results saved to: ${options.output}`));
-      }
-      
-      await runner.cleanup();
-      
-    } catch (error) {
-      console.error(chalk.red('❌ Concurrency benchmark failed:'), error.message);
-      process.exit(1);
-    }
-  });
-
-// Generate test data
-program
-  .command('generate-data')
-  .description('Generate test data for manual testing')
-  .option('-s, --sellers <count>', 'Number of sellers', '10')
-  .option('-b, --buyers <count>', 'Number of buyers', '100')
-  .option('-c, --conversations <count>', 'Conversations per seller', '10')
-  .option('-m, --messages <count>', 'Messages per conversation', '50')
-  .option('-d, --database <db>', 'Target database (scylladb|clickhouse|timescaledb|cockroachdb|all)', 'all')
-  .action(async (options) => {
-    try {
-      console.log(chalk.blue('🏭 Generating test data...'));
-      
-      const generator = new DataGenerator();
-      const data = generator.generateRealisticConversationBatch(
-        Number.parseInt(options.sellers),
-        Number.parseInt(options.buyers),
-        {
-          conversationsPerSeller: Number.parseInt(options.conversations),
-          messagesPerConversation: Number.parseInt(options.messages)
-        }
-      );
-      
-      const databases = options.database === 'all' 
-        ? ['scylladb', 'clickhouse', 'timescaledb', 'cockroachdb']
-        : [options.database];
-      
-      for (const dbName of databases) {
-        console.log(chalk.blue(`\n📊 Inserting data into ${dbName.toUpperCase()}...`));
-        
-        const client = getClient(dbName);
-        await client.connect();
-        
-        try {
-          await client.createSellersBatch(data.sellers);
-          await client.createBuyersBatch(data.buyers);
-          await client.createConversationsBatch(data.conversations);
-          await client.createMessagesBatch(data.messages);
-          
-          console.log(chalk.green(`✅ Data inserted into ${dbName.toUpperCase()}`));
-        } finally {
-          await client.disconnect();
-        }
-      }
-      
-      console.log(chalk.green('\n🎉 Test data generation completed!'));
-      console.log(`Generated: ${data.summary.sellers} sellers, ${data.summary.buyers} buyers, ${data.summary.conversations} conversations, ${data.summary.messages} messages`);
-      
-    } catch (error) {
-      console.error(chalk.red('❌ Data generation failed:'), error.message);
-      process.exit(1);
-    }
-  });
-
-// Health check command
-program
-  .command('health')
-  .description('Check database connectivity and health')
-  .action(async () => {
-    try {
-      console.log(chalk.blue('🏥 Checking database health...'));
-      
-      const clients = {
-        scylladb: new ScyllaDBClient(),
-        clickhouse: new ClickHouseClient(),
-        timescaledb: new TimescaleDBClient(),
-        cockroachdb: new CockroachDBClient()
+        benchmarkRuns: Number.parseInt(options.benchmarkRuns),
+        outputFile: outputFile
       };
       
-      for (const [dbName, client] of Object.entries(clients)) {
-        console.log(chalk.blue(`\n🔍 Checking ${dbName.toUpperCase()}...`));
-        
-        try {
-          await client.connect();
-          const health = await client.healthCheck();
-          const metrics = await client.getMetrics();
-          
-          console.log(chalk.green(`✅ ${dbName.toUpperCase()}: ${health.status}`));
-          if (metrics) {
-            console.log(`   Records: ${JSON.stringify(metrics, null, 2)}`);
-          }
-          
-          await client.disconnect();
-        } catch (error) {
-          console.log(chalk.red(`❌ ${dbName.toUpperCase()}: ${error.message}`));
-        }
-      }
+      const runner = new BenchmarkRunner(benchmarkOptions);
+      const results = await runner.runBenchmarks();
+      
+      console.log(chalk.green('✅ Together benchmark completed successfully!'));
       
     } catch (error) {
-      console.error(chalk.red('❌ Health check failed:'), error.message);
+      console.error(chalk.red('❌ Together benchmark failed:'), error.message);
       process.exit(1);
     }
   });
 
-// Setup databases - initialize schemas
+// Quick test command for single database
 program
-  .command('setup')
-  .description('Initialize database schemas (keyspaces, tables, etc.)')
-  .option('-d, --database <db>', 'Target database (scylladb|clickhouse|timescaledb|cockroachdb|all)', 'all')
-  .action(async (options) => {
+  .command('test-database <database>')
+  .description('Quick test of a single database')
+  .option('-s, --scenario <type>', 'Benchmark scenario', 'custom')
+  .option('--skip-docker', 'Skip Docker setup')
+  .action(async (database, options) => {
     try {
-      console.log(chalk.blue('🏗️  Setting up database schemas...'));
-      
-      const databases = options.database === 'all' 
-        ? ['scylladb', 'clickhouse', 'timescaledb', 'cockroachdb']
-        : [options.database];
-      
-      for (const dbName of databases) {
-        console.log(chalk.blue(`\n🔧 Setting up ${dbName.toUpperCase()}...`));
-        
-        try {
-          let client;
-          switch (dbName) {
-            case 'scylladb':
-              client = new ScyllaDBClient();
-              await client.initializeSchema();
-              await client.disconnect();
-              break;
-              
-            case 'clickhouse':
-              client = new ClickHouseClient();
-              await client.connect();
-              console.log('✅ ClickHouse schema already initialized via Docker');
-              await client.disconnect();
-              break;
-              
-            case 'timescaledb':
-              client = new TimescaleDBClient();
-              await client.connect();
-              console.log('✅ TimescaleDB schema already initialized via Docker');
-              await client.disconnect();
-              break;
-              
-            case 'cockroachdb':
-              client = new CockroachDBClient();
-              await client.connect();
-              console.log('✅ CockroachDB schema already initialized via Docker');
-              await client.disconnect();
-              break;
-              
-            default:
-              throw new Error(`Unknown database: ${dbName}`);
-          }
-          
-          console.log(chalk.green(`✅ ${dbName.toUpperCase()} setup completed`));
-          
-        } catch (error) {
-          console.error(chalk.red(`❌ ${dbName.toUpperCase()} setup failed:`), error.message);
-        }
+      if (!AVAILABLE_DATABASES.includes(database.toLowerCase())) {
+        console.error(chalk.red(`❌ Invalid database: ${database}`));
+        console.error(chalk.gray(`Available databases: ${AVAILABLE_DATABASES.join(', ')}`));
+        process.exit(1);
       }
       
-      console.log(chalk.green('\n🎉 Database setup completed!'));
+      const dbName = database.toLowerCase();
+      console.log(chalk.blue(`🚀 Quick testing ${dbName.toUpperCase()}...`));
+      
+      if (!options.skipDocker) {
+        await dockerOrchestrator.startDatabases([dbName], 'isolated');
+      }
+      
+      const benchmarkOptions = {
+        databases: [dbName],
+        mode: 'isolated',
+        scenario: options.scenario,
+        batchSize: 100, // Smaller batch for quick test
+        warmupRuns: 1,
+        benchmarkRuns: 2,
+        outputFile: null
+      };
+      
+      const runner = new BenchmarkRunner(benchmarkOptions);
+      await runner.runBenchmarks();
+      
+      console.log(chalk.green(`✅ ${dbName.toUpperCase()} quick test completed!`));
       
     } catch (error) {
-      console.error(chalk.red('❌ Setup failed:'), error.message);
+      console.error(chalk.red(`❌ Quick test failed: ${error.message}`));
       process.exit(1);
     }
   });
 
-// Clean databases
-program
-  .command('clean')
-  .description('Clean all data from databases (DESTRUCTIVE)')
-  .option('-d, --database <db>', 'Target database (scylladb|clickhouse|timescaledb|cockroachdb|all)', 'all')
-  .option('--confirm', 'Confirm destructive operation')
-  .action(async (options) => {
-    if (!options.confirm) {
-      console.log(chalk.red('⚠️  This is a destructive operation. Use --confirm flag to proceed.'));
-      process.exit(1);
-    }
-    
-    try {
-      console.log(chalk.yellow('🧹 Cleaning databases...'));
-      
-      const databases = options.database === 'all' 
-        ? ['scylladb', 'clickhouse', 'timescaledb', 'cockroachdb']
-        : [options.database];
-      
-      for (const dbName of databases) {
-        console.log(chalk.blue(`\n🗑️  Cleaning ${dbName.toUpperCase()}...`));
-        
-        const client = getClient(dbName);
-        await client.connect();
-        
-        try {
-          // Note: This would need to be implemented in each client
-          if (client.truncateAllTables) {
-            await client.truncateAllTables();
-            console.log(chalk.green(`✅ ${dbName.toUpperCase()} cleaned`));
-          } else {
-            console.log(chalk.yellow(`⚠️  Clean operation not implemented for ${dbName.toUpperCase()}`));
-          }
-        } finally {
-          await client.disconnect();
-        }
-      }
-      
-    } catch (error) {
-      console.error(chalk.red('❌ Clean operation failed:'), error.message);
-      process.exit(1);
-    }
-  });
-
-// Compare results
-program
-  .command('compare')
-  .description('Compare results from multiple benchmark runs')
-  .argument('<files...>', 'JSON result files to compare')
-  .action(async (files) => {
-    try {
-      console.log(chalk.blue('📊 Comparing benchmark results...'));
-      
-      const results = [];
-      for (const file of files) {
-        const content = await fs.readFile(file, 'utf8');
-        const data = JSON.parse(content);
-        results.push({ file: path.basename(file), data });
-      }
-      
-      // Simple comparison display
-      console.log(chalk.green('\n📈 Comparison Results:'));
-      results.forEach(result => {
-        console.log(chalk.blue(`\n📄 ${result.file}:`));
-        if (result.data.summary?.winner) {
-          console.log(`   Writes: ${result.data.summary.winner.writes?.database || 'N/A'}`);
-          console.log(`   Reads: ${result.data.summary.winner.reads?.database || 'N/A'}`);
-          console.log(`   Concurrency: ${result.data.summary.winner.concurrency?.database || 'N/A'}`);
-        }
-      });
-      
-    } catch (error) {
-      console.error(chalk.red('❌ Comparison failed:'), error.message);
-      process.exit(1);
-    }
-  });
-
-// Docker orchestration commands
+// Docker management commands
 program
   .command('docker-up')
   .description('Start all database containers')
-  .action(async () => {
+  .option('--databases <list>', 'Comma-separated list of databases to start', AVAILABLE_DATABASES.join(','))
+  .action(async (options) => {
     try {
-      await dockerOrchestrator.startAllDatabases();
-      console.log(chalk.green('✅ All database containers started successfully'));
+      const databases = parseDatabaseList(options.databases);
+      await dockerOrchestrator.startDatabases(databases, 'together');
+      console.log(chalk.green('✅ Database containers started successfully!'));
     } catch (error) {
       console.error(chalk.red('❌ Failed to start containers:'), error.message);
       process.exit(1);
@@ -536,7 +272,7 @@ program
   .action(async () => {
     try {
       await dockerOrchestrator.stopAllDatabases();
-      console.log(chalk.green('✅ All database containers stopped successfully'));
+      console.log(chalk.green('✅ All containers stopped successfully!'));
     } catch (error) {
       console.error(chalk.red('❌ Failed to stop containers:'), error.message);
       process.exit(1);
@@ -545,11 +281,11 @@ program
 
 program
   .command('docker-status')
-  .description('Show status of all containers')
+  .description('Show status of database containers')
   .action(async () => {
     try {
-      const status = await dockerOrchestrator.getContainerStatus();
       console.log(chalk.blue('🐳 Container Status:'));
+      const status = await dockerOrchestrator.getContainerStatus();
       console.log(status);
     } catch (error) {
       console.error(chalk.red('❌ Failed to get container status:'), error.message);
@@ -558,116 +294,196 @@ program
   });
 
 program
-  .command('docker-isolated')
-  .description('Start a single database in isolation')
-  .option('-d, --database <db>', 'Database to start (scylladb, clickhouse, timescaledb, cockroachdb)', 'scylladb')
-  .action(async (options) => {
-    try {
-      await dockerOrchestrator.startIsolatedDatabase(options.database);
-      console.log(chalk.green(`✅ ${options.database.toUpperCase()} container started in isolation`));
-    } catch (error) {
-      console.error(chalk.red(`❌ Failed to start ${options.database}:`), error.message);
-      process.exit(1);
-    }
-  });
-
-program
   .command('docker-cleanup')
-  .description('Stop and cleanup all containers')
+  .description('Stop all containers and clean up Docker resources')
   .action(async () => {
     try {
       await dockerOrchestrator.cleanupAllContainers();
-      console.log(chalk.green('✅ All containers cleaned up successfully'));
+      console.log(chalk.green('✅ Docker cleanup completed!'));
     } catch (error) {
-      console.error(chalk.red('❌ Failed to cleanup containers:'), error.message);
+      console.error(chalk.red('❌ Docker cleanup failed:'), error.message);
       process.exit(1);
     }
   });
 
-// List scenarios
+// Health check command
+program
+  .command('health')
+  .description('Check health of all database connections')
+  .option('--databases <list>', 'Comma-separated list of databases to check', AVAILABLE_DATABASES.join(','))
+  .action(async (options) => {
+    try {
+      console.log(chalk.blue('🏥 Checking database health...'));
+      
+      const databases = parseDatabaseList(options.databases);
+      const clients = {
+        scylladb: ScyllaDBClient,
+        clickhouse: ClickHouseClient,
+        timescaledb: TimescaleDBClient,
+        cockroachdb: CockroachDBClient
+      };
+      
+      for (const dbName of databases) {
+        console.log(chalk.yellow(`\n🔍 Checking ${dbName.toUpperCase()}...`));
+        
+        try {
+          const ClientClass = clients[dbName];
+          const client = new ClientClass();
+          
+          await client.connect();
+          const health = await client.healthCheck();
+          
+          console.log(chalk.green(`✅ ${dbName.toUpperCase()}: healthy`));
+          if (health.records) {
+            console.log(chalk.gray(`   Records: ${JSON.stringify(health.records)}`));
+          }
+          
+          await client.disconnect();
+          
+        } catch (error) {
+          console.error(chalk.red(`❌ ${dbName.toUpperCase()}: ${error.message}`));
+        }
+      }
+      
+    } catch (error) {
+      console.error(chalk.red('❌ Health check failed:'), error.message);
+      process.exit(1);
+    }
+  });
+
+// Setup command
+program
+  .command('setup')
+  .description('Initialize database schemas')
+  .option('--databases <list>', 'Comma-separated list of databases to setup', AVAILABLE_DATABASES.join(','))
+  .action(async (options) => {
+    try {
+      console.log(chalk.blue('🏗️ Setting up database schemas...'));
+      
+      const databases = parseDatabaseList(options.databases);
+      const clients = {
+        scylladb: ScyllaDBClient,
+        clickhouse: ClickHouseClient,
+        timescaledb: TimescaleDBClient,
+        cockroachdb: CockroachDBClient
+      };
+      
+      for (const dbName of databases) {
+        console.log(chalk.yellow(`\n🔧 Setting up ${dbName.toUpperCase()}...`));
+        
+        try {
+          const ClientClass = clients[dbName];
+          const client = new ClientClass();
+          
+          // ScyllaDB handles connection internally in initializeSchema
+          if (dbName !== 'scylladb') {
+            await client.connect();
+          }
+          
+          if (typeof client.initializeSchema === 'function') {
+            await client.initializeSchema();
+            console.log(chalk.green(`✅ ${dbName.toUpperCase()} schema initialized`));
+          } else {
+            console.log(chalk.yellow(`⚠️ ${dbName.toUpperCase()} schema initialization not implemented`));
+          }
+          
+          // Only disconnect if we connected
+          if (dbName !== 'scylladb' && client.isConnected) {
+            await client.disconnect();
+          }
+          
+        } catch (error) {
+          console.error(chalk.red(`❌ ${dbName.toUpperCase()} setup failed: ${error.message}`));
+        }
+      }
+      
+    } catch (error) {
+      console.error(chalk.red('❌ Setup failed:'), error.message);
+      process.exit(1);
+    }
+  });
+
+// Scenarios command
 program
   .command('scenarios')
   .description('List available benchmark scenarios')
   .action(() => {
-    console.log(chalk.blue('📋 Available Benchmark Scenarios:'));
-    console.log(chalk.green('\n🔥 high_write_volume'));
-    console.log('   - 100 sellers, 1000 buyers');
-    console.log('   - 50 conversations per seller');
-    console.log('   - 200 messages per conversation');
-    console.log('   - Focus: High-throughput message ingestion');
+    console.log(chalk.blue('📋 Available Benchmark Scenarios:\n'));
     
-    console.log(chalk.green('\n📊 read_heavy_analytics'));
-    console.log('   - 50 sellers, 500 buyers');
-    console.log('   - 30 conversations per seller');
-    console.log('   - 500 messages per conversation');
-    console.log('   - Focus: Complex analytical queries');
+    const scenarios = {
+      custom: {
+        description: 'Basic read/write operations for quick testing',
+        operations: ['writes', 'reads'],
+        recommended: 'Development and quick validation'
+      },
+      high_write_volume: {
+        description: 'Heavy write workload testing',
+        operations: ['writes', 'batch_writes'],
+        recommended: 'Write performance optimization'
+      },
+      read_heavy_analytics: {
+        description: 'Complex analytical queries',
+        operations: ['reads', 'complex_queries'],
+        recommended: 'Query performance optimization'
+      },
+      mixed_workload: {
+        description: 'Realistic mixed read/write workload',
+        operations: ['writes', 'reads', 'batch_writes', 'complex_queries'],
+        recommended: 'Production simulation'
+      }
+    };
     
-    console.log(chalk.green('\n⚖️  mixed_workload (default)'));
-    console.log('   - 200 sellers, 2000 buyers');
-    console.log('   - 25 conversations per seller');
-    console.log('   - 150 messages per conversation');
-    console.log('   - Focus: Balanced read/write operations');
-    
-    console.log(chalk.green('\n🧪 custom'));
-    console.log('   - 10 sellers, 100 buyers');
-    console.log('   - 10 conversations per seller');
-    console.log('   - 50 messages per conversation');
-    console.log('   - Focus: Small-scale testing');
+    for (const [name, info] of Object.entries(scenarios)) {
+      console.log(chalk.cyan(`${name}:`));
+      console.log(chalk.gray(`  Description: ${info.description}`));
+      console.log(chalk.gray(`  Operations: ${info.operations.join(', ')}`));
+      console.log(chalk.gray(`  Recommended for: ${info.recommended}\n`));
+    }
   });
 
-// Helper functions
-function getClient(dbName) {
-  switch (dbName) {
-    case 'scylladb':
-      return new ScyllaDBClient();
-    case 'clickhouse':
-      return new ClickHouseClient();
-    case 'timescaledb':
-      return new TimescaleDBClient();
-    case 'cockroachdb':
-      return new CockroachDBClient();
-    default:
-      throw new Error(`Unknown database: ${dbName}`);
-  }
-}
-
-async function saveReport(report, filename) {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const reportsDir = path.join(projectRoot, 'reports');
-  
-  // Ensure reports directory exists
+// Utility functions
+async function saveResults(results, filename) {
   try {
+    const reportsDir = path.join(process.cwd(), 'reports');
     await fs.mkdir(reportsDir, { recursive: true });
+    
+    let outputFilename = filename;
+    if (!outputFilename.endsWith('.json')) {
+      outputFilename += '.json';
+    }
+    
+    const filepath = path.join(reportsDir, outputFilename);
+    await fs.writeFile(filepath, JSON.stringify(results, null, 2));
+    
+    console.log(chalk.green(`\n📄 Results saved to: ${filepath}`));
+    
   } catch (error) {
-    // Directory might already exist, that's fine
+    console.error(chalk.red(`❌ Failed to save results: ${error.message}`));
   }
-  
-  // Determine the full file path
-  let fullPath;
-  if (filename) {
-    // If filename is provided, use it (with timestamp if no extension)
-    const hasExtension = filename.includes('.');
-    const finalFilename = hasExtension ? filename : `${filename}-${timestamp}.json`;
-    fullPath = path.join(reportsDir, finalFilename);
-  } else {
-    // Default filename with timestamp
-    fullPath = path.join(reportsDir, `benchmark-report-${timestamp}.json`);
-  }
-  
-  await fs.writeFile(fullPath, JSON.stringify(report, null, 2));
-  return fullPath;
 }
 
-// Error handling
-process.on('unhandledRejection', (error) => {
-  console.error(chalk.red('❌ Unhandled promise rejection:'), error);
-  process.exit(1);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error(chalk.red('❌ Uncaught exception:'), error);
-  process.exit(1);
-});
+function displayFinalSummary(results) {
+  console.log(chalk.blue('\n📊 Final Summary:'));
+  
+  const successful = Object.entries(results.databases)
+    .filter(([_, result]) => result.status === 'completed')
+    .map(([db, _]) => db);
+    
+  const failed = Object.entries(results.databases)
+    .filter(([_, result]) => result.status !== 'completed')
+    .map(([db, _]) => db);
+  
+  if (successful.length > 0) {
+    console.log(chalk.green(`✅ Successful: ${successful.join(', ')}`));
+  }
+  
+  if (failed.length > 0) {
+    console.log(chalk.red(`❌ Failed: ${failed.join(', ')}`));
+  }
+  
+  console.log(chalk.gray(`\n📈 Total databases tested: ${Object.keys(results.databases).length}`));
+  console.log(chalk.gray(`🕒 Completed at: ${results.metadata.timestamp}`));
+}
 
 // Parse command line arguments
 program.parse();
