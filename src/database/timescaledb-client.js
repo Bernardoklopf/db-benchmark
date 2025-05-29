@@ -20,8 +20,10 @@ export class TimescaleDBClient {
       this.isConnected = true;
       console.log('✅ TimescaleDB connected successfully');
     } catch (error) {
-      console.error('❌ TimescaleDB connection failed:', error);
-      throw error;
+      // Provide a clean error message without the stack trace
+      const errorMessage = error.message || 'Unknown error';
+      console.error(`❌ TimescaleDB connection failed: ${errorMessage}`);
+      throw new Error('Connection failed - database may not be ready yet');
     }
   }
 
@@ -601,8 +603,10 @@ export class TimescaleDBClient {
       
       console.log('✅ TimescaleDB schema initialized successfully');
     } catch (error) {
-      console.error('❌ TimescaleDB schema initialization failed:', error);
-      throw error;
+      // Provide a clean error message without the stack trace
+      const errorMessage = error.message || 'Unknown error';
+      console.error(`❌ TimescaleDB schema initialization failed: ${errorMessage}`);
+      throw new Error(errorMessage);
     }
   }
 

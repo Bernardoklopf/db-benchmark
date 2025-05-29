@@ -19,8 +19,10 @@ export class CockroachDBClient {
       this.isConnected = true;
       console.log('✅ CockroachDB connected successfully');
     } catch (error) {
-      console.error('❌ CockroachDB connection failed:', error);
-      throw error;
+      // Provide a clean error message without the stack trace
+      const errorMessage = error.message || 'Unknown error';
+      console.error(`❌ CockroachDB connection failed: ${errorMessage}`);
+      throw new Error('Connection failed - database may not be ready yet');
     }
   }
 
@@ -658,8 +660,10 @@ export class CockroachDBClient {
         client.release();
       }
     } catch (error) {
-      console.error('❌ Error initializing CockroachDB schema:', error);
-      throw error;
+      // Provide a clean error message without the stack trace
+      const errorMessage = error.message || 'Unknown error';
+      console.error(`❌ CockroachDB schema initialization failed: ${errorMessage}`);
+      throw new Error(errorMessage);
     }
   }
 
@@ -686,8 +690,10 @@ export class CockroachDBClient {
         client.release();
       }
     } catch (error) {
-      console.error('❌ Error during CockroachDB cleanup:', error);
-      throw error;
+      // Provide a clean error message without the stack trace
+      const errorMessage = error.message || 'Unknown error';
+      console.error(`❌ Error during CockroachDB cleanup: ${errorMessage}`);
+      throw new Error(errorMessage);
     }
   }
 }

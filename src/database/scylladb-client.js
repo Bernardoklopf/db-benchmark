@@ -15,8 +15,10 @@ export class ScyllaDBClient {
       this.isConnected = true;
       console.log('✅ ScyllaDB connected successfully');
     } catch (error) {
-      console.error('❌ ScyllaDB connection failed:', error);
-      throw error;
+      // Provide a clean error message without the stack trace
+      const errorMessage = error.message || 'Unknown error';
+      console.error(`❌ ScyllaDB connection failed: ${errorMessage}`);
+      throw new Error('Connection failed - database may not be ready yet');
     }
   }
 
@@ -38,7 +40,14 @@ export class ScyllaDBClient {
         contactPoints: databaseConfig.scylladb.contactPoints,
         localDataCenter: databaseConfig.scylladb.localDataCenter
       });
-      await systemClient.connect();
+      
+      try {
+        await systemClient.connect();
+      } catch (error) {
+        // Simplified error message without stack trace
+        const errorMessage = 'Connection failed - database may not be ready yet';
+        throw new Error(errorMessage);
+      }
       
       // Create keyspace
       await systemClient.execute(`
@@ -53,7 +62,13 @@ export class ScyllaDBClient {
       
       // Now connect to the benchmark keyspace
       if (!this.isConnected) {
-        await this.connect();
+        try {
+          await this.connect();
+        } catch (error) {
+          // Simplified error message without stack trace
+          const errorMessage = 'Connection to keyspace failed - database may not be ready yet';
+          throw new Error(errorMessage);
+        }
       }
       
       // Create tables
@@ -149,8 +164,10 @@ export class ScyllaDBClient {
       console.log('✅ ScyllaDB schema initialized successfully');
       
     } catch (error) {
-      console.error('❌ ScyllaDB schema initialization failed:', error);
-      throw error;
+      // Provide a clean error message without the stack trace
+      const errorMessage = error.message || 'Unknown error';
+      console.error(`❌ ScyllaDB schema initialization failed: ${errorMessage}`);
+      throw new Error(errorMessage);
     }
   }
 

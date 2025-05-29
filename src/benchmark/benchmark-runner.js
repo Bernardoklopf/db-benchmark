@@ -223,7 +223,7 @@ export class BenchmarkRunner {
     return scenarioMap[this.options.scenario] || scenarioMap.custom;
   }
 
-  async runSpecificBenchmark(client, benchmarkType, dbName) {
+  async runSpecificBenchmark(client, benchmarkType) {
     const results = {
       warmup: [],
       benchmark: [],

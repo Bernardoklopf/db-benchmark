@@ -476,7 +476,9 @@ export class ClickHouseClient {
             return;
           } catch (error) {
             if (attempt === maxRetries) {
-              throw error;
+              // Simplify error message for final throw
+              const errorMessage = error.message || 'Unknown error';
+              throw new Error(`${description} failed: ${errorMessage}`);
             }
             console.log(`⚠️  ${description} attempt ${attempt}/${maxRetries} failed, retrying...`);
             await new Promise(resolve => setTimeout(resolve, 1000));
@@ -627,9 +629,12 @@ export class ClickHouseClient {
       }
       
       console.log('✅ ClickHouse schema initialized successfully');
+      
     } catch (error) {
-      console.error('❌ ClickHouse schema initialization failed:', error);
-      throw error;
+      // Provide a clean error message without the stack trace
+      const errorMessage = error.message || 'Unknown error';
+      console.error(`❌ ClickHouse schema initialization failed: ${errorMessage}`);
+      throw new Error(errorMessage);
     }
   }
 
