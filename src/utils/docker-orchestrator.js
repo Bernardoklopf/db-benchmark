@@ -1,5 +1,5 @@
-import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import { exec } from 'node:child_process';
 import chalk from 'chalk';
 import ora from 'ora';
 
@@ -26,8 +26,6 @@ export class DockerOrchestrator {
   findDockerPath() {
     const possiblePaths = [
       '/usr/local/bin/docker',
-      '/opt/homebrew/bin/docker',
-      '/Applications/Docker.app/Contents/Resources/bin/docker'
     ];
     
     // For now, return the most common path - could be enhanced with actual detection
@@ -147,6 +145,49 @@ export class DockerOrchestrator {
     );
   }
 
+  async stopOtherDatabases(targetDatabase) {
+    const allDatabases = Object.keys(this.databaseServices);
+    const otherDatabases = allDatabases.filter(db => db !== targetDatabase);
+    
+    if (otherDatabases.length > 0) {
+      console.log(chalk.yellow(`🛑 Stopping other databases: ${otherDatabases.join(', ')}`));
+      await this.stopDatabases(otherDatabases);
+    }
+  }
+
+  async cleanupDockerVolumes() {
+    console.log(chalk.yellow('🧹 Cleaning up Docker volumes...'));
+    try {
+      await this.executeCommand(
+        `${this.dockerPath} volume prune -f`,
+        'Cleaning up unused Docker volumes'
+      );
+    } catch (error) {
+      console.log(chalk.gray('⚠️ Volume cleanup failed (non-critical):', error.message));
+    }
+  }
+
+  async restartDatabase(database) {
+    console.log(chalk.yellow(`🔄 Restarting ${database.toUpperCase()}...`));
+    
+    // Stop only the target database
+    await this.stopDatabases([database]);
+    
+    // Wait a moment for clean shutdown
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Start only the target database (supporting services should already be running)
+    const databaseService = this.databaseServices[database];
+    if (databaseService) {
+      await this.executeCommand(
+        `${this.dockerComposePath} -f docker-compose.yml up -d ${databaseService}`,
+        `Starting database: ${database}`
+      );
+    } else {
+      throw new Error(`Unknown database: ${database}`);
+    }
+  }
+
   async getContainerStatus() {
     try {
       const result = await this.executeCommand(
@@ -158,6 +199,24 @@ export class DockerOrchestrator {
     } catch (error) {
       console.error(chalk.red('Failed to get container status:'), error.message);
       return 'Unable to retrieve container status';
+    }
+  }
+
+  async getRunningDatabases() {
+    try {
+      const status = await this.getContainerStatus();
+      const runningDatabases = [];
+      
+      for (const [dbName, serviceName] of Object.entries(this.databaseServices)) {
+        if (status.includes(serviceName) && (status.includes('Up') || status.includes('healthy'))) {
+          runningDatabases.push(dbName);
+        }
+      }
+      
+      return runningDatabases;
+    } catch (error) {
+      console.error(chalk.red('Failed to get running databases:'), error.message);
+      return [];
     }
   }
 
@@ -229,21 +288,8 @@ export class DockerOrchestrator {
     throw new Error(`Database ${database} failed to start within ${maxAttempts * delay / 1000} seconds`);
   }
 
-  async getRunningDatabases() {
-    try {
-      const status = await this.getContainerStatus();
-      const runningDatabases = [];
-      
-      for (const [dbName, serviceName] of Object.entries(this.databaseServices)) {
-        if (status.includes(serviceName) && (status.includes('Up') || status.includes('healthy'))) {
-          runningDatabases.push(dbName);
-        }
-      }
-      
-      return runningDatabases;
-    } catch (error) {
-      console.error(chalk.red('Failed to get running databases:'), error.message);
-      return [];
-    }
+  async waitForDatabaseReady(database, maxAttempts = 60, delay = 2000) {
+    // Alias for waitForDatabase to maintain consistency with BenchmarkRunner expectations
+    return await this.waitForDatabase(database, maxAttempts, delay);
   }
 }

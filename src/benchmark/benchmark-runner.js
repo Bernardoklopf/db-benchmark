@@ -3,6 +3,7 @@ import { ClickHouseClient } from '../database/clickhouse-client.js';
 import { TimescaleDBClient } from '../database/timescaledb-client.js';
 import { CockroachDBClient } from '../database/cockroachdb-client.js';
 import { DataGenerator } from '../utils/data-generator.js';
+import { DockerOrchestrator } from '../utils/docker-orchestrator.js';
 import { performance } from 'node:perf_hooks';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -34,6 +35,7 @@ export class BenchmarkRunner {
     
     this.initializeClients();
     this.dataGenerator = new DataGenerator();
+    this.dockerOrchestrator = new DockerOrchestrator();
     this.results = {
       metadata: {
         timestamp: new Date().toISOString(),
@@ -283,9 +285,29 @@ export class BenchmarkRunner {
   }
 
   async runWriteBenchmark(client) {
-    const messages = this.dataGenerator.generateMessages(this.options.batchSize);
+    const testData = this.dataGenerator.generateMessages(this.options.batchSize);
     
-    for (const message of messages) {
+    // Create required entities first to satisfy foreign key constraints
+    if (testData.sellers && typeof client.createSeller === 'function') {
+      for (const seller of testData.sellers) {
+        await client.createSeller(seller);
+      }
+    }
+    
+    if (testData.buyers && typeof client.createBuyer === 'function') {
+      for (const buyer of testData.buyers) {
+        await client.createBuyer(buyer);
+      }
+    }
+    
+    if (testData.conversations && typeof client.createConversation === 'function') {
+      for (const conversation of testData.conversations) {
+        await client.createConversation(conversation);
+      }
+    }
+    
+    // Now create messages
+    for (const message of testData.messages) {
       await client.createMessage(message);
     }
   }
@@ -300,13 +322,35 @@ export class BenchmarkRunner {
   }
 
   async runBatchWriteBenchmark(client) {
-    const messages = this.dataGenerator.generateMessages(this.options.batchSize);
+    const testData = this.dataGenerator.generateMessages(this.options.batchSize);
     
+    // Create required entities first to satisfy foreign key constraints
+    if (testData.sellers && typeof client.createSeller === 'function') {
+      for (const seller of testData.sellers) {
+        await client.createSeller(seller);
+      }
+    }
+    
+    if (testData.buyers && typeof client.createBuyer === 'function') {
+      for (const buyer of testData.buyers) {
+        await client.createBuyer(buyer);
+      }
+    }
+    
+    if (testData.conversations && typeof client.createConversation === 'function') {
+      for (const conversation of testData.conversations) {
+        await client.createConversation(conversation);
+      }
+    }
+    
+    // Now create messages in batch
     if (typeof client.createMessagesBatch === 'function') {
-      await client.createMessagesBatch(messages);
+      await client.createMessagesBatch(testData.messages);
     } else {
       // Fallback to individual writes
-      await this.runWriteBenchmark(client);
+      for (const message of testData.messages) {
+        await client.createMessage(message);
+      }
     }
   }
 
@@ -404,5 +448,149 @@ export class BenchmarkRunner {
     } catch (error) {
       console.error(chalk.red(`❌ Failed to save results: ${error.message}`));
     }
+  }
+
+  async runIsolatedBenchmarks() {
+    console.log(chalk.blue('🚀 Starting Isolated Database Benchmark Suite'));
+    console.log(chalk.gray(`Scenario: ${this.options.scenario}`));
+    console.log(chalk.gray(`Databases: ${this.options.databases.join(', ')}`));
+    console.log(chalk.gray('Mode: ISOLATED (one database at a time)'));
+    
+    const allResults = {
+      metadata: {
+        ...this.results.metadata,
+        mode: 'isolated'
+      },
+      databases: {}
+    };
+
+    for (const database of this.options.databases) {
+      console.log(chalk.cyan(`\n🔄 Testing ${database.toUpperCase()} in isolation...`));
+      
+      try {
+        // Stop other databases and clean up
+        await this.prepareIsolatedEnvironment(database);
+        
+        // Run benchmark for this database only
+        const dbResult = await this.runSingleDatabaseBenchmark(database);
+        allResults.databases[database] = dbResult;
+        
+        console.log(chalk.green(`✅ ${database.toUpperCase()} completed successfully`));
+        
+      } catch (error) {
+        console.error(chalk.red(`❌ ${database.toUpperCase()} failed: ${error.message}`));
+        allResults.databases[database] = {
+          status: 'failed',
+          error: error.message
+        };
+      }
+    }
+    
+    // Save consolidated results
+    if (this.options.outputFile) {
+      await this.saveConsolidatedResults(allResults);
+    }
+    
+    // Display final summary
+    this.displayIsolatedSummary(allResults);
+    
+    return allResults;
+  }
+
+  async prepareIsolatedEnvironment(targetDatabase) {
+    console.log(chalk.yellow(`🛠️ Preparing isolated environment for ${targetDatabase.toUpperCase()}...`));
+    
+    // Clean up Docker volumes to ensure fresh state
+    await this.dockerOrchestrator.cleanupDockerVolumes();
+    
+    // Ensure the target database is ready (it should already be running from startIsolatedDatabases)
+    await this.dockerOrchestrator.waitForDatabaseReady(targetDatabase);
+  }
+
+  async runSingleDatabaseBenchmark(database) {
+    // Create a temporary runner for just this database
+    const singleDbRunner = new BenchmarkRunner({
+      ...this.options,
+      databases: [database],
+      mode: 'isolated'
+    });
+    
+    try {
+      // Run the benchmark
+      const results = await singleDbRunner.runBenchmarks();
+      return results.databases[database];
+      
+    } finally {
+      // Ensure cleanup
+      await singleDbRunner.cleanup();
+    }
+  }
+
+  async cleanupDatabaseData(database) {
+    console.log(chalk.yellow(`🧹 Cleaning up ${database.toUpperCase()} data...`));
+    
+    try {
+      const ClientClass = this.clientMap[database];
+      if (!ClientClass) return;
+      
+      const client = new ClientClass();
+      await client.connect();
+      
+      // Clean up previous test data
+      if (typeof client.truncateAllTables === 'function') {
+        await client.truncateAllTables();
+      }
+      
+      await client.disconnect();
+      
+    } catch (error) {
+      console.log(chalk.gray(`⚠️ Cleanup warning for ${database}: ${error.message}`));
+    }
+  }
+
+  async saveConsolidatedResults(results) {
+    try {
+      const reportsDir = path.join(process.cwd(), 'reports');
+      await fs.mkdir(reportsDir, { recursive: true });
+      
+      let filename = this.options.outputFile;
+      if (!filename.endsWith('.json')) {
+        filename += '.json';
+      }
+      
+      const filepath = path.join(reportsDir, filename);
+      await fs.writeFile(filepath, JSON.stringify(results, null, 2));
+      
+      console.log(chalk.green(`\n📄 Results saved to: ${filepath}`));
+      
+    } catch (error) {
+      console.error(chalk.red(`❌ Failed to save results: ${error.message}`));
+    }
+  }
+
+  displayIsolatedSummary(results) {
+    console.log(chalk.blue('\n📊 Final Summary:'));
+    
+    const successful = [];
+    const failed = [];
+    
+    for (const [dbName, dbResult] of Object.entries(results.databases)) {
+      if (dbResult.status === 'completed') {
+        successful.push(dbName);
+      } else {
+        failed.push(dbName);
+      }
+    }
+    
+    if (successful.length > 0) {
+      console.log(chalk.green(`✅ Successful: ${successful.join(', ')}`));
+    }
+    
+    if (failed.length > 0) {
+      console.log(chalk.red(`❌ Failed: ${failed.join(', ')}`));
+    }
+    
+    console.log(chalk.gray(`\n📈 Total databases tested: ${Object.keys(results.databases).length}`));
+    console.log(chalk.gray(`🕒 Completed at: ${new Date().toISOString()}`));
   }
 }

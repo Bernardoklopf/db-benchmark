@@ -315,6 +315,44 @@ export class DataGenerator {
     };
   }
 
+  // Generate simple messages for benchmarking
+  generateMessages(count) {
+    const messages = [];
+    
+    // Create test sellers and buyers first to satisfy foreign key constraints
+    const seller = this.generateSeller();
+    const buyer = this.generateBuyer();
+    
+    // Create a test conversation with valid seller and buyer IDs
+    const conversation = this.generateConversation(seller.id, buyer.id);
+    
+    // Generate messages for this conversation
+    for (let i = 0; i < count; i++) {
+      const senderType = faker.helpers.arrayElement(this.senderTypes);
+      const senderId = senderType === 'seller' ? seller.id : buyer.id;
+      
+      messages.push({
+        id: uuidv4(),
+        conversation_id: conversation.id,
+        sender_type: senderType,
+        sender_id: senderId,
+        message_text: faker.lorem.sentence(),
+        message_type: faker.helpers.arrayElement(this.messageTypes),
+        metadata: { benchmark: true },
+        timestamp: new Date(),
+        created_at: new Date()
+      });
+    }
+    
+    // Return the complete dataset with all required entities
+    return {
+      sellers: [seller],
+      buyers: [buyer], 
+      conversations: [conversation],
+      messages: messages
+    };
+  }
+
   // Generate high-volume streaming data for stress testing
   generateStreamingMessages(conversationIds, count, timeWindow = 60000) {
     const messages = [];

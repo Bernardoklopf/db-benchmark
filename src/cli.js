@@ -87,64 +87,21 @@ program
         await dockerOrchestrator.startDatabases(databases, 'isolated');
       }
       
-      // Run benchmarks for each database individually
-      const allResults = {
-        metadata: {
-          timestamp: new Date().toISOString(),
-          mode: 'isolated',
-          scenario: scenario,
-          databases: databases,
-          configuration: {
-            warmupRuns: Number.parseInt(options.warmupRuns),
-            benchmarkRuns: Number.parseInt(options.benchmarkRuns),
-            batchSize: Number.parseInt(options.batchSize)
-          }
-        },
-        databases: {}
+      // Run isolated benchmarks using the enhanced BenchmarkRunner method
+      const benchmarkOptions = {
+        databases: databases,
+        mode: 'isolated',
+        scenario: scenario,
+        batchSize: Number.parseInt(options.batchSize),
+        warmupRuns: Number.parseInt(options.warmupRuns),
+        benchmarkRuns: Number.parseInt(options.benchmarkRuns),
+        outputFile: outputFile
       };
       
-      for (const database of databases) {
-        console.log(chalk.cyan(`\n🔄 Testing ${database.toUpperCase()} in isolation...`));
-        
-        try {
-          // Start only this database
-          if (!options.skipDocker) {
-            await dockerOrchestrator.startDatabases([database], 'isolated');
-          }
-          
-          // Run benchmark for this database
-          const benchmarkOptions = {
-            databases: [database],
-            mode: 'isolated',
-            scenario: scenario,
-            batchSize: Number.parseInt(options.batchSize),
-            warmupRuns: Number.parseInt(options.warmupRuns),
-            benchmarkRuns: Number.parseInt(options.benchmarkRuns),
-            outputFile: null // Don't save individual results
-          };
-          
-          const runner = new BenchmarkRunner(benchmarkOptions);
-          const results = await runner.runBenchmarks();
-          
-          // Merge results
-          allResults.databases[database] = results.databases[database];
-          
-          console.log(chalk.green(`✅ ${database.toUpperCase()} completed successfully`));
-          
-        } catch (error) {
-          console.error(chalk.red(`❌ ${database.toUpperCase()} failed: ${error.message}`));
-          allResults.databases[database] = {
-            status: 'failed',
-            error: error.message
-          };
-        }
-      }
+      const runner = new BenchmarkRunner(benchmarkOptions);
+      const allResults = await runner.runIsolatedBenchmarks();
       
-      // Save consolidated results
-      await saveResults(allResults, outputFile);
-      
-      // Display final summary
-      displayFinalSummary(allResults);
+      console.log(chalk.green('🎉 All isolated benchmarks completed!'));
       
     } catch (error) {
       console.error(chalk.red('❌ Isolated benchmark failed:'), error.message);
