@@ -83,28 +83,28 @@ node src/cli.js scenarios
 - **Strengths**: Extreme write performance, horizontal scaling
 - **Schema**: Denormalized tables with time-bucket partitioning
 - **Use Case**: High-volume message ingestion
-- **Resource**: 2GB memory, 1.0 CPU core
+- **Resource**: 1GB memory, 1.0 CPU core
 
 ### ClickHouse
 - **Type**: Columnar OLAP database
 - **Strengths**: Analytical queries, compression, materialized views
 - **Schema**: Optimized for time-series analytics
 - **Use Case**: Real-time analytics and reporting
-- **Resource**: 2GB memory, 1.0 CPU core
+- **Resource**: 1GB memory, 1.0 CPU core
 
 ### TimescaleDB
 - **Type**: PostgreSQL with time-series extensions
 - **Strengths**: SQL compatibility, hybrid workloads, continuous aggregates
 - **Schema**: Hypertables with automatic partitioning
 - **Use Case**: Complex queries with relational integrity
-- **Resource**: 2GB memory, 1.0 CPU core
+- **Resource**: 1GB memory, 1.0 CPU core
 
 ### CockroachDB
 - **Type**: Distributed SQL database
 - **Strengths**: ACID compliance, horizontal scaling, consistency
 - **Schema**: Standard relational with distributed architecture
 - **Use Case**: Transactional workloads with strong consistency
-- **Resource**: 2GB memory, 1.0 CPU core
+- **Resource**: 1GB memory, 1.0 CPU core
 
 ## 🎮 CLI Commands Reference
 
@@ -506,7 +506,7 @@ METRICS_INTERVAL=5000
 ### Resource Management
 
 #### For M1 Mac (16GB RAM):
-- **Total Docker Memory**: ~8GB (2GB per database)
+- **Total Docker Memory**: ~4GB (1GB per database)
 - **Recommended**: Use isolated benchmarks
 - **Cleanup**: Automatic between tests
 
