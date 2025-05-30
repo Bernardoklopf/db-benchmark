@@ -82,14 +82,17 @@ program
       
       const outputFile = options.output || generateOutputFilename('isolated', scenario, databases);
       
+      for (const db of databases) {
+        console.log(chalk.gray(`Starting ${db} in isolation...`));
+      
       // Start Docker containers if needed
       if (!options.skipDocker) {
-        await dockerOrchestrator.startDatabases(databases, 'isolated');
+        await dockerOrchestrator.startDatabases([db], 'isolated');
       }
       
       // Run isolated benchmarks using the enhanced BenchmarkRunner method
       const benchmarkOptions = {
-        databases: databases,
+        databases: [db],
         mode: 'isolated',
         scenario: scenario,
         batchSize: Number.parseInt(options.batchSize),
@@ -100,6 +103,7 @@ program
       
       const runner = new BenchmarkRunner(benchmarkOptions);
       const allResults = await runner.runIsolatedBenchmarks();
+    }
       
       console.log(chalk.green('🎉 All isolated benchmarks completed!'));
       
