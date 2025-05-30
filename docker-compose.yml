@@ -24,7 +24,7 @@ services:
       retries: 5
       start_period: 60s
 
-  # ClickHouse - Columnar OLAP database
+  # ClickHouse - Columnar analytical database
   clickhouse:
     image: clickhouse/clickhouse-server:23.8
     container_name: benchmark_clickhouse
@@ -32,9 +32,9 @@ services:
       - "8123:8123"  # HTTP port
       - "9000:9000"  # Native port
     environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
       CLICKHOUSE_DB: benchmark
-      CLICKHOUSE_USER: benchmark_user
-      CLICKHOUSE_PASSWORD: benchmark_pass
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - clickhouse_data:/var/lib/clickhouse

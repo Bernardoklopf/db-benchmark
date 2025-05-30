@@ -29,8 +29,8 @@ export const databaseConfig = {
     host: process.env.CLICKHOUSE_HOST || 'localhost',
     port: Number.parseInt(process.env.CLICKHOUSE_PORT) || 8123,
     database: process.env.CLICKHOUSE_DB || 'benchmark',
-    username: process.env.CLICKHOUSE_USER || 'benchmark_user',
-    password: process.env.CLICKHOUSE_PASSWORD || 'benchmark_pass',
+    username: process.env.CLICKHOUSE_USER || 'default',
+    password: process.env.CLICKHOUSE_PASSWORD || '',
     compression: {
       request: true,
       response: true

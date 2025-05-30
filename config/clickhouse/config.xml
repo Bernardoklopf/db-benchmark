@@ -7,10 +7,7 @@
     <uncompressed_cache_size>536870912</uncompressed_cache_size> <!-- 512MB -->
     <mark_cache_size>268435456</mark_cache_size> <!-- 256MB -->
     
-    <!-- Memory settings for 4G container limit -->
-    <max_memory_usage>2147483648</max_memory_usage> <!-- 2GB (50% of Docker limit) -->
-    <max_bytes_before_external_group_by>1073741824</max_bytes_before_external_group_by> <!-- 1GB (25% of Docker limit) -->
-    <max_bytes_before_external_sort>1073741824</max_bytes_before_external_sort> <!-- 1GB (25% of Docker limit) -->
+    <!-- Memory settings moved to users.xml -->
     
     <!-- Logging -->
     <logger>
