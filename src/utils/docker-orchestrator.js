@@ -20,7 +20,7 @@ export class DockerOrchestrator {
     };
     
     // Supporting services that are always needed
-    this.supportingServices = ['redis', 'prometheus', 'grafana'];
+    this.supportingServices = ['redis'];
   }
 
   findDockerPath() {
@@ -102,7 +102,7 @@ export class DockerOrchestrator {
     const supportingServicesStr = this.supportingServices.join(' ');
     await this.executeCommand(
       `${this.dockerComposePath} -f docker-compose.yml up -d ${supportingServicesStr}`,
-      'Starting supporting services (Redis, Prometheus, Grafana)'
+      'Starting supporting service (Redis)'
     );
     
     // Start the specified databases
